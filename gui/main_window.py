@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QMessageBox, QFileDialog, QCheckBox,
     QSplitter, QHeaderView, QTextBrowser
 )
+from PyQt5.QtGui import QIntValidator
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QSettings, QTimer
 import logging
 
@@ -24,18 +25,22 @@ def normalize_url(url: str) -> str:
         url = 'https://' + url
     return url.rstrip('/')
 
+# Функция для форматирования даты и времени: сначала время, затем дата в формате "часы:минуты:секунды дд.мм.гггг"
+def format_datetime(dt: datetime) -> str:
+    return dt.strftime("%H:%M:%S %d.%m.%Y")
+
 class ContentAnalyzer:
     def __init__(self):
         pass
     # Дополнительные методы анализа можно добавить здесь
 
 class MainWindow(QMainWindow):
-    # Сигнал для обновления таблицы при обновлении данных сайта
+    # Сигнал для обновления таблицы при изменении данных сайта
     site_updated = pyqtSignal(str, int, dict)  # url, row, changes
 
     def __init__(self):
         super().__init__()
-        # Добавляем атрибут для хранения состояния мониторинга
+        # Атрибут состояния мониторинга для кнопки-тоггл
         self.monitoring_active = False
         
         self.setWindowTitle("Web Deface Monitor V.10.0_ML")
@@ -44,12 +49,12 @@ class MainWindow(QMainWindow):
         self.current_theme = self.settings.value("theme", "light")
         self.apply_theme(self.current_theme)
         
-        # Внутренняя база: url -> {content, previous_content, baseline, row, last_modified, changes, status}
+        # Внутренняя база сайтов: ключ – URL, значение – данные сайта
         self.sites_data: Dict[str, Dict[str, Any]] = {}
         self.data_lock = threading.Lock()
         self.analyzer = ContentAnalyzer()
         self.notifications_enabled = False
-        
+
         self.worker = None
         self.worker_thread = None
 
@@ -63,7 +68,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(centralWidget)
         mainLayout = QVBoxLayout(centralWidget)
 
-        # Фиксированный заголовок с новой версией
+        # Заголовок
         headerLabel = QLabel("Web Deface Monitor V.10.0_ML")
         headerLabel.setStyleSheet("background-color: #004080; color: white; font-size: 16pt; padding: 5px;")
         headerLabel.setAlignment(Qt.AlignCenter)
@@ -73,12 +78,12 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         mainLayout.addWidget(splitter)
 
-        # Левый блок: панель управления
+        # Левая панель: элементы управления
         controlWidget = QWidget()
         controlLayout = QVBoxLayout(controlWidget)
         controlLayout.setContentsMargins(10, 10, 10, 10)
 
-        # Группа управления списком сайтов
+        # Блок управления списком сайтов
         urlLayout = QHBoxLayout()
         self.urlEdit = QLineEdit()
         self.urlEdit.setPlaceholderText("Введите URL сайта")
@@ -97,23 +102,24 @@ class MainWindow(QMainWindow):
         btnSiteLayout.addWidget(self.btnDelete)
         controlLayout.addLayout(btnSiteLayout)
 
-        # Группа управления отчётом
+        # Блок управления отчётом (единственная кнопка для скачивания уже сгенерированного отчёта)
         btnReportLayout = QHBoxLayout()
-        self.btnReport = QPushButton("Генерировать и сохранить отчёт")
-        self.btnReport.setToolTip("Сформировать отчёт и сохранить его в файл")
-        self.btnReport.clicked.connect(self.on_generate_report)
+        self.btnReport = QPushButton("Скачать отчет")
+        self.btnReport.setToolTip("Скачать последний сгенерированный отчет по выбранному сайту")
+        self.btnReport.clicked.connect(self.download_changes)
         btnReportLayout.addWidget(self.btnReport)
         controlLayout.addLayout(btnReportLayout)
 
-        # Интервал мониторинга
+        # Блок для ввода интервала мониторинга
         intervalLayout = QHBoxLayout()
         intervalLayout.addWidget(QLabel("Интервал (мин):"))
         self.intervalEdit = QLineEdit(str(CONFIG.get('default_interval', 30)))
+        self.intervalEdit.setValidator(QIntValidator(1, 1440, self))
         self.intervalEdit.setFixedWidth(50)
         intervalLayout.addWidget(self.intervalEdit)
         controlLayout.addLayout(intervalLayout)
 
-        # Группа управления фоновым мониторингом: одна кнопка-тоггл
+        # Блок управления фоновым мониторингом (единая кнопка-тоггл)
         btnMonitorLayout = QHBoxLayout()
         self.btnToggleMonitor = QPushButton("Запустить")
         self.btnToggleMonitor.setToolTip("Нажмите, чтобы запустить/остановить мониторинг")
@@ -121,7 +127,7 @@ class MainWindow(QMainWindow):
         btnMonitorLayout.addWidget(self.btnToggleMonitor)
         controlLayout.addLayout(btnMonitorLayout)
 
-        # Управление уведомлениями
+        # Блок уведомлений
         self.notify_checkbox = QCheckBox("Уведомления в Telegram")
         self.notify_checkbox.setChecked(self.notifications_enabled)
         self.notify_checkbox.setToolTip("Включить или отключить уведомления в Telegram")
@@ -130,7 +136,7 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(controlWidget)
 
-        # Правый блок: таблица сайтов
+        # Правая панель: таблица сайтов
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["Сайт", "Структура", "Контент", "Метаданные", "Итого", "Обновлено", "Статус"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -149,7 +155,7 @@ class MainWindow(QMainWindow):
         footer.setStyleSheet("color: green; font-size: 10pt;")
         self.statusBar.addPermanentWidget(footer)
 
-        # QTimer для дополнительных обновлений (если требуется)
+        # QTimer для дополнительных обновлений, если потребуется
         self.monitorTimer = QTimer()
         self.monitorTimer.timeout.connect(self.monitor_loop)
 
@@ -200,14 +206,16 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem("0.00%")
                 item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row, col, item)
+            # Сохраняем данные сайта с пустым отчетом
             self.sites_data[url] = {
                 "content": None,
                 "previous_content": None,
                 "baseline": None,
                 "row": row,
-                "last_modified": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_modified": format_datetime(datetime.now()),
                 "changes": {"visual_changes": {"structure": 0.0, "content": 0.0, "metadata": 0.0}},
-                "status": "OK"
+                "status": "OK",
+                "report": ""
             }
 
     def delete_site(self):
@@ -251,16 +259,18 @@ class MainWindow(QMainWindow):
                 html = fetch_page(url)
                 if html is None:
                     raise Exception("Не удалось получить содержимое страницы")
-                new_data = {"html": html, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                new_data = {"html": html, "timestamp": format_datetime(datetime.now())}
                 with self.data_lock:
                     old_data = self.sites_data[url]["content"] if self.sites_data[url]["content"] else {"html": ""}
                     changes = calculate_changes(old_data, new_data, self.analyzer)
+                    report = generate_report(old_data, new_data, changes, url)
                     self.sites_data[url].update({
                         "previous_content": old_data,
                         "content": new_data,
-                        "last_modified": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "last_modified": format_datetime(datetime.now()),
                         "changes": changes,
-                        "status": "OK"
+                        "status": "OK",
+                        "report": report
                     })
                     local_row = None
                     for r in range(self.table.rowCount()):
@@ -325,6 +335,7 @@ class MainWindow(QMainWindow):
             return 0.0
 
     def download_changes(self):
+        # Кнопка скачивания отчёта для выбранного сайта
         selected = self.table.selectedItems()
         if not selected:
             QMessageBox.warning(self, "Ошибка", "Выберите сайт для скачивания отчета")
@@ -332,15 +343,12 @@ class MainWindow(QMainWindow):
         row = selected[0].row()
         url = self.table.item(row, 0).text()
         with self.data_lock:
-            if url not in self.sites_data:
+            if url not in self.sites_data or not self.sites_data[url].get("report"):
+                QMessageBox.warning(self, "Ошибка", "Отчет не сформирован для выбранного сайта")
                 return
-            site_data = self.sites_data[url]
-            old_content = site_data.get("previous_content", {"html": ""})
-            new_content = site_data.get("content", {"html": ""})
-            changes = site_data.get("changes", {})
-        report = generate_report(old_content, new_content, changes, url)
+            report = self.sites_data[url]["report"]
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить отчет", f"report_{url.replace('://','_').replace('/', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+            self, "Сохранить отчет", f"report_{url.replace('://','_').replace('/', '_')}_{format_datetime(datetime.now())}.html",
             "HTML файлы (*.html);;Все файлы (*)"
         )
         if file_path:
@@ -401,12 +409,19 @@ class MainWindow(QMainWindow):
                         break
                 if target_row is None:
                     return
+                report = generate_report(
+                    self.sites_data[url]["content"] if self.sites_data[url]["content"] else {"html": ""},
+                    {"html": result.get("html", "")},
+                    result.get("changes", {}),
+                    url
+                )
                 self.sites_data[url].update({
                     "previous_content": self.sites_data[url]["content"] if self.sites_data[url]["content"] else {"html": ""},
                     "content": {"html": result.get("html", ""), "timestamp": result.get("timestamp", "")},
-                    "last_modified": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_modified": format_datetime(datetime.now()),
                     "changes": result.get("changes", {}),
-                    "status": result.get("status", "OK")
+                    "status": result.get("status", "OK"),
+                    "report": report
                 })
             self.site_updated.emit(url, target_row, result.get("changes", {}))
             QTimer.singleShot(0, lambda: QMessageBox.information(self, "Отчет", f"Отчет по сайту '{url}' сформирован и данные обновлены."))

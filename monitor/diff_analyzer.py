@@ -3,15 +3,40 @@ import difflib
 from datetime import datetime
 
 def calculate_changes(old_data: dict, new_data: dict, analyzer) -> dict:
+    """
+    Вычисляет процент изменений между двумя версиями HTML-контента.
+    
+    Если предыдущий контент пустой, а новый не пустой, возвращает 100% изменений.
+    В противном случае использует difflib для оценки схожести.
+    
+    :param old_data: Словарь с ключом 'html' для старой версии.
+    :param new_data: Словарь с ключом 'html' для новой версии.
+    :param analyzer: Объект анализатора (пока не используется – placeholder).
+    :return: Словарь с изменениями, например, {"visual_changes": {"structure": value, ...}}
+    """
     old_html = old_data.get("html", "")
     new_html = new_data.get("html", "")
+    # Если предыдущий контент пустой, а новый не пустой – возвращаем 100%
+    if not old_html and new_html:
+        change_ratio = 100.0
+        return {"visual_changes": {"structure": change_ratio, "content": change_ratio, "metadata": change_ratio}}
     if not old_html and not new_html:
         return {"visual_changes": {"structure": 0.0, "content": 0.0, "metadata": 0.0}}
+    
     matcher = difflib.SequenceMatcher(None, old_html, new_html)
     change_ratio = (1 - matcher.ratio()) * 100
     return {"visual_changes": {"structure": change_ratio, "content": change_ratio, "metadata": change_ratio}}
 
 def generate_report(old_content: dict, new_content: dict, changes: dict, url: str) -> str:
+    """
+    Генерирует HTML-отчет по изменениям между двумя версиями контента.
+    
+    :param old_content: Словарь с ключом 'html' для старой версии.
+    :param new_content: Словарь с ключом 'html' для новой версии.
+    :param changes: Словарь с рассчитанными изменениями.
+    :param url: URL сайта.
+    :return: HTML-строка с отчетом, где проценты отображаются с символом '%'.
+    """
     report = f"""
     <html>
     <head>
@@ -41,7 +66,7 @@ def generate_report(old_content: dict, new_content: dict, changes: dict, url: st
     </head>
     <body>
       <h1>Отчет по сайту: {url}</h1>
-      <p>Дата отчета: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+      <p>Дата отчета: {datetime.now().strftime("%H:%M:%S %d.%m.%Y")}</p>
       <h2>Сводка изменений</h2>
       <table>
         <tr>
@@ -65,10 +90,3 @@ def generate_report(old_content: dict, new_content: dict, changes: dict, url: st
     </html>
     """
     return report
-
-def export_pdf(html_file: str, output_pdf: str) -> None:
-    from weasyprint import HTML
-    try:
-        HTML(html_file).write_pdf(output_pdf)
-    except Exception as e:
-        raise Exception(f"Ошибка экспорта PDF: {e}")
