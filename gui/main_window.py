@@ -18,8 +18,6 @@ from async_tasks.worker_thread import Worker
 from monitor.fetcher import fetch_page
 from monitor.parser import parse_html
 from monitor.utils import CONFIG
-# Если уведомления не нужны, можно удалить этот импорт
-# from monitor.notifier import check_configuration  
 
 def normalize_url(url: str) -> str:
     if not url.startswith(('http://', 'https://')):
@@ -37,7 +35,9 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        # Обновляем название окна на новую версию
+        # Добавляем атрибут для хранения состояния мониторинга
+        self.monitoring_active = False
+        
         self.setWindowTitle("Web Deface Monitor V.10.0_ML")
         self.resize(1200, 600)
         self.settings = QSettings("At-Consulting", "WebDefaceMonitor")
@@ -52,80 +52,84 @@ class MainWindow(QMainWindow):
         
         self.worker = None
         self.worker_thread = None
-        
+
         self.init_ui()
         self.load_default_sites()
-        
+
         self.site_updated.connect(self._update_table_row)
-        
+
     def init_ui(self):
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
         mainLayout = QVBoxLayout(centralWidget)
-        
+
         # Фиксированный заголовок с новой версией
         headerLabel = QLabel("Web Deface Monitor V.10.0_ML")
         headerLabel.setStyleSheet("background-color: #004080; color: white; font-size: 16pt; padding: 5px;")
         headerLabel.setAlignment(Qt.AlignCenter)
         headerLabel.setFixedHeight(50)
         mainLayout.addWidget(headerLabel)
-        
+
         splitter = QSplitter(Qt.Horizontal)
         mainLayout.addWidget(splitter)
-        
+
         # Левый блок: панель управления
         controlWidget = QWidget()
         controlLayout = QVBoxLayout(controlWidget)
-        controlLayout.setContentsMargins(10,10,10,10)
-        
-        # Поле ввода URL и кнопка "Добавить"
+        controlLayout.setContentsMargins(10, 10, 10, 10)
+
+        # Группа управления списком сайтов
+        urlLayout = QHBoxLayout()
         self.urlEdit = QLineEdit()
         self.urlEdit.setPlaceholderText("Введите URL сайта")
-        controlLayout.addWidget(QLabel("URL сайта:"))
-        controlLayout.addWidget(self.urlEdit)
-        btnLayout = QHBoxLayout()
+        urlLayout.addWidget(QLabel("URL сайта:"))
+        urlLayout.addWidget(self.urlEdit)
+        controlLayout.addLayout(urlLayout)
+        
+        btnSiteLayout = QHBoxLayout()
         self.btnAdd = QPushButton("Добавить")
+        self.btnAdd.setToolTip("Добавить сайт в список")
         self.btnAdd.clicked.connect(self.add_site)
         self.btnDelete = QPushButton("Удалить")
+        self.btnDelete.setToolTip("Удалить выбранный сайт")
         self.btnDelete.clicked.connect(self.delete_site)
-        btnLayout.addWidget(self.btnAdd)
-        btnLayout.addWidget(self.btnDelete)
-        controlLayout.addLayout(btnLayout)
-        
-        # Кнопка "Сформировать отчёт"
-        self.btnUpdate = QPushButton("Сформировать отчёт")
-        self.btnUpdate.clicked.connect(self.on_generate_report)
-        controlLayout.addWidget(self.btnUpdate)
-        
-        # Кнопка "Скачать отчет"
-        self.btnDownload = QPushButton("Скачать отчет")
-        self.btnDownload.clicked.connect(self.download_changes)
-        controlLayout.addWidget(self.btnDownload)
-        
+        btnSiteLayout.addWidget(self.btnAdd)
+        btnSiteLayout.addWidget(self.btnDelete)
+        controlLayout.addLayout(btnSiteLayout)
+
+        # Группа управления отчётом
+        btnReportLayout = QHBoxLayout()
+        self.btnReport = QPushButton("Генерировать и сохранить отчёт")
+        self.btnReport.setToolTip("Сформировать отчёт и сохранить его в файл")
+        self.btnReport.clicked.connect(self.on_generate_report)
+        btnReportLayout.addWidget(self.btnReport)
+        controlLayout.addLayout(btnReportLayout)
+
         # Интервал мониторинга
-        controlLayout.addWidget(QLabel("Интервал (мин):"))
+        intervalLayout = QHBoxLayout()
+        intervalLayout.addWidget(QLabel("Интервал (мин):"))
         self.intervalEdit = QLineEdit(str(CONFIG.get('default_interval', 30)))
         self.intervalEdit.setFixedWidth(50)
-        controlLayout.addWidget(self.intervalEdit)
-        
-        # Кнопки "Запуск" и "Остановка" фонового мониторинга
-        btnLayout2 = QHBoxLayout()
-        self.btnStart = QPushButton("Запуск")
-        self.btnStart.clicked.connect(self.start_worker_monitoring)
-        self.btnStop = QPushButton("Остановка")
-        self.btnStop.clicked.connect(self.stop_monitoring)
-        btnLayout2.addWidget(self.btnStart)
-        btnLayout2.addWidget(self.btnStop)
-        controlLayout.addLayout(btnLayout2)
-        
-        # Кнопка уведомлений
+        intervalLayout.addWidget(self.intervalEdit)
+        controlLayout.addLayout(intervalLayout)
+
+        # Группа управления фоновым мониторингом: одна кнопка-тоггл
+        btnMonitorLayout = QHBoxLayout()
+        self.btnToggleMonitor = QPushButton("Запустить")
+        self.btnToggleMonitor.setToolTip("Нажмите, чтобы запустить/остановить мониторинг")
+        self.btnToggleMonitor.clicked.connect(self.toggle_monitoring)
+        btnMonitorLayout.addWidget(self.btnToggleMonitor)
+        controlLayout.addLayout(btnMonitorLayout)
+
+        # Управление уведомлениями
         self.notify_checkbox = QCheckBox("Уведомления в Telegram")
         self.notify_checkbox.setChecked(self.notifications_enabled)
+        self.notify_checkbox.setToolTip("Включить или отключить уведомления в Telegram")
         self.notify_checkbox.stateChanged.connect(lambda: self.toggle_notifications())
         controlLayout.addWidget(self.notify_checkbox)
-        
+
         splitter.addWidget(controlWidget)
-        
+
         # Правый блок: таблица сайтов
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["Сайт", "Структура", "Контент", "Метаданные", "Итого", "Обновлено", "Статус"])
@@ -134,7 +138,7 @@ class MainWindow(QMainWindow):
         self.table.cellDoubleClicked.connect(self.show_diff_window)
         splitter.addWidget(self.table)
         splitter.setSizes([300, 800])
-        
+
         # Строка состояния
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
@@ -144,11 +148,11 @@ class MainWindow(QMainWindow):
         footer.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         footer.setStyleSheet("color: green; font-size: 10pt;")
         self.statusBar.addPermanentWidget(footer)
-        
+
         # QTimer для дополнительных обновлений (если требуется)
         self.monitorTimer = QTimer()
         self.monitorTimer.timeout.connect(self.monitor_loop)
-        
+
     def apply_theme(self, theme: str):
         if theme == "dark":
             self.setStyleSheet("""
@@ -164,8 +168,16 @@ class MainWindow(QMainWindow):
         self.notifications_enabled = self.notify_checkbox.isChecked()
 
     def load_default_sites(self):
-        # Реализуйте загрузку сайтов из конфигурационного файла, если необходимо
-        pass
+        try:
+            import yaml
+            with open("config/config.yaml", "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            default_sites = config.get("sites", [])
+            for site in default_sites:
+                site = normalize_url(site)
+                self.add_site_to_table(site)
+        except Exception as e:
+            logging.error(f"Ошибка загрузки стандартных сайтов: {e}")
 
     def add_site(self):
         url = normalize_url(self.urlEdit.text().strip())
@@ -261,6 +273,7 @@ class MainWindow(QMainWindow):
                 with self.data_lock:
                     if url in self.sites_data:
                         self._update_error_status(url, target_row, str(e))
+                        logging.error(f"Ошибка обновления сайта {url}: {str(e)}")
         threading.Thread(target=fetch_and_update, daemon=True).start()
 
     def _update_error_status(self, url: str, row: int, error_message: str):
@@ -365,82 +378,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(btnSave)
         dialog.exec_()
 
-    def save_report_dialog(self, report: str):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Сохранить отчет", "", "HTML файлы (*.html);;Все файлы (*)")
-        if file_path:
-            try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(report)
-                QMessageBox.information(self, "Успех", "Отчет успешно сохранен")
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить отчет:\n{str(e)}")
-
-    def monitor_loop(self):
-        with self.data_lock:
-            urls = list(self.sites_data.keys())
-        for url in urls:
-            self.update_single_site(url)
-        try:
-            interval = int(self.intervalEdit.text())
-        except ValueError:
-            interval = CONFIG.get('default_interval', 30)
-        self.statusBar.showMessage(f"Статус: Активен (интервал: {interval} мин)", 5000)
-
-    def start_worker_monitoring(self):
-        # Единый механизм фонового мониторинга через QThread с Worker
-        if self.worker_thread is not None:
-            QMessageBox.information(self, "Информация", "Фоновый мониторинг уже запущен.")
-            return
-        self.statusBar.showMessage("Статус: Запущен")
-        with self.data_lock:
-            urls = list(self.sites_data.keys())
-        try:
-            interval_seconds = int(self.intervalEdit.text()) * 60
-        except ValueError:
-            interval_seconds = CONFIG.get('default_interval', 30) * 60
-        from PyQt5.QtCore import QThread
-        self.worker = Worker(urls, interval_seconds)
-        self.worker_thread = QThread()
-        self.worker.moveToThread(self.worker_thread)
-        self.worker_thread.started.connect(self.worker.run)
-        self.worker.update_signal.connect(self.update_table)
-        self.worker.finished_signal.connect(lambda: self.statusBar.showMessage("Статус: Остановлен"))
-        self.worker_thread.start()
-
-    def stop_monitoring(self):
-        self.monitorTimer.stop()
-        self.statusBar.showMessage("Статус: Остановлен")
-        self.statusBar.setStyleSheet("color: red;")
-        self.btnStart.setEnabled(True)
-        self.btnStop.setEnabled(False)
-        if self.worker is not None:
-            self.worker.stop()
-        if self.worker_thread is not None:
-            self.worker_thread.quit()
-            self.worker_thread.wait()
-            self.worker = None
-            self.worker_thread = None
-
-    @pyqtSlot(list)
-    def update_table(self, results: List[Dict[str, Any]]):
-        for res in results:
-            url = res.get("url")
-            if not url:
-                continue
-            target_row = None
-            with self.data_lock:
-                for row in range(self.table.rowCount()):
-                    if self.table.item(row, 0).text().strip() == url:
-                        target_row = row
-                        break
-            if target_row is not None:
-                self.table.setItem(target_row, 1, QTableWidgetItem(str(res.get("structure", ""))))
-                self.table.setItem(target_row, 2, QTableWidgetItem(str(res.get("content", ""))))
-                self.table.setItem(target_row, 3, QTableWidgetItem(str(res.get("metadata", ""))))
-                self.table.setItem(target_row, 4, QTableWidgetItem(str(res.get("overall", ""))))
-                self.table.setItem(target_row, 5, QTableWidgetItem(res.get("updated", "")))
-                self.table.setItem(target_row, 6, QTableWidgetItem(res.get("status", "")))
-
     def on_generate_report(self):
         selected_row = self.table.currentRow()
         if selected_row < 0:
@@ -475,6 +412,85 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: QMessageBox.information(self, "Отчет", f"Отчет по сайту '{url}' сформирован и данные обновлены."))
         except Exception as e:
             QTimer.singleShot(0, lambda: QMessageBox.critical(self, "Ошибка", f"Ошибка при формировании отчета для {url}:\n{str(e)}"))
+
+    def monitor_loop(self):
+        with self.data_lock:
+            urls = list(self.sites_data.keys())
+        for url in urls:
+            self.update_single_site(url)
+        try:
+            interval = int(self.intervalEdit.text())
+        except ValueError:
+            interval = CONFIG.get('default_interval', 30)
+        self.statusBar.showMessage(f"Статус: Активен (интервал: {interval} мин)", 5000)
+
+    def start_worker_monitoring(self):
+        if self.worker_thread is not None:
+            QMessageBox.information(self, "Информация", "Фоновый мониторинг уже запущен.")
+            return
+        self.statusBar.showMessage("Статус: Запущен")
+        with self.data_lock:
+            urls = list(self.sites_data.keys())
+        try:
+            interval_seconds = int(self.intervalEdit.text()) * 60
+        except ValueError:
+            interval_seconds = CONFIG.get('default_interval', 30) * 60
+        from PyQt5.QtCore import QThread
+        self.worker = Worker(urls, interval_seconds)
+        self.worker_thread = QThread()
+        self.worker.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.worker.run)
+        self.worker.update_signal.connect(self.update_table)
+        self.worker.finished_signal.connect(lambda: self.statusBar.showMessage("Статус: Остановлен"))
+        self.worker_thread.start()
+
+    def stop_monitoring(self):
+        self.monitorTimer.stop()
+        self.statusBar.showMessage("Статус: Остановлен")
+        self.statusBar.setStyleSheet("color: red;")
+        self.btnToggleMonitor.setText("Запустить")
+        if self.worker is not None:
+            self.worker.stop()
+        if self.worker_thread is not None:
+            self.worker_thread.quit()
+            self.worker_thread.wait()
+            self.worker = None
+            self.worker_thread = None
+        self.monitoring_active = False
+
+    @pyqtSlot(list)
+    def update_table(self, results: List[Dict[str, Any]]):
+        for res in results:
+            url = res.get("url")
+            if not url:
+                continue
+            target_row = None
+            with self.data_lock:
+                for row in range(self.table.rowCount()):
+                    if self.table.item(row, 0).text().strip() == url:
+                        target_row = row
+                        break
+            if target_row is not None:
+                self.table.setItem(target_row, 1, QTableWidgetItem(str(res.get("structure", ""))))
+                self.table.setItem(target_row, 2, QTableWidgetItem(str(res.get("content", ""))))
+                self.table.setItem(target_row, 3, QTableWidgetItem(str(res.get("metadata", ""))))
+                self.table.setItem(target_row, 4, QTableWidgetItem(str(res.get("overall", ""))))
+                self.table.setItem(target_row, 5, QTableWidgetItem(res.get("updated", "")))
+                self.table.setItem(target_row, 6, QTableWidgetItem(res.get("status", "")))
+
+    def toggle_monitoring(self):
+        if not self.monitoring_active:
+            self.start_worker_monitoring()
+            self.monitoring_active = True
+            self.btnToggleMonitor.setText("Остановить")
+            self.statusBar.showMessage("Статус: Запущен")
+            self.statusBar.setStyleSheet("color: green;")
+        else:
+            self.stop_monitoring()
+            self.monitoring_active = False
+            self.btnToggleMonitor.setText("Запустить")
+            self.statusBar.showMessage("Статус: Остановлен")
+            self.statusBar.setStyleSheet("color: red;")
 
 def main():
     app = QApplication(sys.argv)
