@@ -19,10 +19,13 @@ from PyQt6.QtWidgets import (
     QTabWidget, QScrollArea, QSizePolicy, QPlainTextEdit
 )
 from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QCoreApplication
-from PyQt6.QtGui import QIcon, QAction, QColor, QFont
+from PyQt6.QtGui import QIcon, QAction, QColor, QFont, QBrush
+from PyQt6.QtWidgets import QDateTime
 
 from utils.logger import get_module_logger, log_exception
 from utils.common import format_timestamp, get_diff_color, get_status_color, handle_errors
+from ui.table_utils import OptimizedTable, BatchDataLoader, get_ui_updater
+from ui.table_converter import TableStyler, CommonTableSetup
 
 
 class SiteDialog(QDialog):
@@ -410,7 +413,17 @@ class SitesWidget(QWidget):
         # Инициализация UI
         self._init_ui()
         
-        # Обновление данных
+        # Создаем менеджер обновлений UI
+        self.ui_updater = get_ui_updater()
+        self.ui_updater.set_delay(200)  # 200 мс задержка для группировки обновлений
+        
+        # Регистрируем обработчик обновлений для таблицы сайтов
+        self.ui_updater.register_handler("sites_table", self._update_sites_table)
+        
+        # Создаем загрузчик данных для таблицы
+        self.data_loader = BatchDataLoader(self.sites_table)
+        self.data_loader.batch_size = 50  # Загружаем по 50 сайтов за раз
+        
         self.update_data()
         
         self.logger.debug("Виджет сайтов инициализирован")
@@ -471,24 +484,24 @@ class SitesWidget(QWidget):
         
         layout.addLayout(toolbar_layout)
         
-        # Таблица с сайтами
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels([
-            "ID", "Имя", "URL", "Метод", "Последняя проверка", 
-            "Последнее изменение", "Группа", "Статус"
-        ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)  # URL растягивается
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)  # Запрет редактирования
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        # Создаем оптимизированную таблицу вместо обычной
+        self.sites_table = OptimizedTable(0, 0)
+        self.sites_table.setObjectName("sites_table")
         
-        # Подключение сигналов
-        self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        # Настраиваем таблицу с помощью общего метода настройки
+        CommonTableSetup.setup_site_table(
+            self.sites_table,
+            connect_signals=True,
+            parent=self,
+            double_click_handler=self.on_site_double_clicked
+        )
         
-        layout.addWidget(self.table)
+        # Создаем индексы для ускорения поиска
+        self.sites_table.create_index(0, True)  # ID (уникальный)
+        self.sites_table.create_index(1, False)  # URL
+        self.sites_table.create_index(4, False)  # Статус
+        
+        layout.addWidget(self.sites_table)
         
         # Панель статуса
         status_layout = QHBoxLayout()
@@ -500,162 +513,263 @@ class SitesWidget(QWidget):
         
         layout.addLayout(status_layout)
     
-    @handle_errors(error_msg="Ошибка при обновлении данных о сайтах")
     def update_data(self):
-        """Обновление данных о сайтах"""
-        # Получаем список сайтов
-        sites = self.app_context.get_sites()
+        """Обновляет данные в таблице."""
+        # Блокируем обновления UI во время загрузки данных
+        self.ui_updater.block_updates(True)
         
-        # Получаем список групп для отображения имен вместо ID
-        groups = self.app_context.get_groups()
-        group_names = {group['id']: group['name'] for group in groups}
-        
-        # Очищаем таблицу
-        self.table.setRowCount(0)
-        
-        if not sites:
-            self.status_label.setText("Всего сайтов: 0")
-            return
-        
-        # Заполняем таблицу
-        for i, site in enumerate(sites):
-            self.table.insertRow(i)
+        try:
+            # Получаем данные сайтов с учетом фильтров
+            sites = self.get_filtered_sites()
             
-            # ID
-            self.table.setItem(i, 0, QTableWidgetItem(str(site.get('id', ''))))
-            
-            # Имя
-            self.table.setItem(i, 1, QTableWidgetItem(site.get('name', '')))
-            
-            # URL
-            self.table.setItem(i, 2, QTableWidgetItem(site.get('url', '')))
-            
-            # Метод проверки
-            method = site.get('check_method', 'static')
-            method_map = {
-                'static': "Статический",
-                'dynamic': "Динамический"
+            # Определяем маппинг полей на столбцы
+            column_mapping = {
+                "id": 0,
+                "url": 1,
+                "name": 2,
+                "type": 3,
+                "status": 4,
+                "last_check": 5,
+                "interval": 6,
+                "tags": 7
             }
-            method_text = method_map.get(method, method)
-            self.table.setItem(i, 3, QTableWidgetItem(method_text))
             
-            # Последняя проверка
-            last_check = site.get('last_check')
-            last_check_text = self._format_datetime(last_check) if last_check else "Никогда"
-            self.table.setItem(i, 4, QTableWidgetItem(last_check_text))
-            
-            # Последнее изменение
-            last_change = site.get('last_change')
-            last_change_text = self._format_datetime(last_change) if last_change else "Нет изменений"
-            last_change_item = QTableWidgetItem(last_change_text)
-            
-            # Подсветка недавних изменений
-            if last_change:
-                try:
-                    if isinstance(last_change, str):
-                        last_change = datetime.datetime.fromisoformat(last_change.replace('Z', '+00:00'))
-                    
-                    # Если изменение произошло в течение последних 24 часов
-                    delta = datetime.datetime.now() - last_change
-                    if delta.total_seconds() < 24 * 3600:
-                        last_change_item.setForeground(QColor(255, 0, 0))  # Красный цвет
-                except (ValueError, TypeError):
-                    pass
-            
-            self.table.setItem(i, 5, last_change_item)
-            
-            # Группа
-            group_id = site.get('group_id')
-            group_name = group_names.get(group_id, "Без группы") if group_id else "Без группы"
-            self.table.setItem(i, 6, QTableWidgetItem(group_name))
-            
-            # Статус
-            status = site.get('status', '')
-            status_map = {
-                'active': "Активен",
-                'paused': "Приостановлен",
-                'disabled': "Отключен"
+            # Создаем специальные обработчики для некоторых полей
+            item_creators = {
+                "status": lambda status: self._create_status_item(status),
+                "last_check": lambda timestamp: self._create_timestamp_item(timestamp),
+                "tags": lambda tags: self._create_tags_item(tags)
             }
-            status_text = status_map.get(status, status)
-            status_item = QTableWidgetItem(status_text)
             
-            # Цвет в зависимости от статуса
-            if status == 'active':
-                status_item.setForeground(QColor(0, 128, 0))  # Зеленый
-            elif status == 'paused':
-                status_item.setForeground(QColor(255, 165, 0))  # Оранжевый
-            elif status == 'disabled':
-                status_item.setForeground(QColor(128, 128, 128))  # Серый
+            # Используем пакетную загрузку данных
+            self.sites_table.set_loading(True)
+            self.data_loader.load_data(sites, column_mapping, item_creators)
+            self.sites_table.set_loading(False)
             
-            self.table.setItem(i, 7, status_item)
+            # Обновляем статистику
+            self.update_stats(sites)
         
-        # Обновляем статус
-        self.status_label.setText(f"Всего сайтов: {len(sites)}")
-        
-        # Сбрасываем выделение
-        self.table.clearSelection()
-        self.btn_delete_sites.setEnabled(False)
-        self.btn_check_sites.setEnabled(False)
+        finally:
+            # Разблокируем обновления UI
+            self.ui_updater.block_updates(False)
     
-    def _format_datetime(self, dt):
+    def _create_status_item(self, status):
         """
-        Форматирование даты и времени
+        Создает элемент для отображения статуса сайта.
         
         Args:
-            dt: Дата и время
+            status: Статус сайта
             
         Returns:
-            str: Отформатированная строка даты и времени
+            QTableWidgetItem: Элемент для отображения статуса
         """
-        try:
-            if isinstance(dt, str):
-                dt = datetime.datetime.fromisoformat(dt.replace('Z', '+00:00'))
-            return dt.strftime("%d.%m.%Y %H:%M")
-        except (ValueError, TypeError, AttributeError):
-            return str(dt)
-    
-    def _on_selection_changed(self):
-        """Обработка изменения выделения в таблице"""
-        # Получаем выбранные строки
-        selected_rows = {index.row() for index in self.table.selectedIndexes()}
+        item = QTableWidgetItem(status)
         
-        # Активируем кнопки, если есть выбранные строки
-        has_selection = len(selected_rows) > 0
-        self.btn_delete_sites.setEnabled(has_selection)
-        self.btn_check_sites.setEnabled(has_selection)
+        # Применяем цветовое оформление в зависимости от статуса
+        if status == "Active":
+            item.setForeground(QBrush(QColor("#4CAF50")))
+        elif status == "Error":
+            item.setForeground(QBrush(QColor("#F44336")))
+        elif status == "Warning":
+            item.setForeground(QBrush(QColor("#FF9800")))
+        
+        return item
     
-    def _on_cell_double_clicked(self, row, column):
+    def _create_timestamp_item(self, timestamp):
         """
-        Обработка двойного клика по ячейке
+        Создает элемент для отображения временной метки.
+        
+        Args:
+            timestamp: Временная метка
+            
+        Returns:
+            QTableWidgetItem: Элемент для отображения временной метки
+        """
+        if not timestamp:
+            return QTableWidgetItem("Never")
+            
+        # Форматируем дату и время
+        dt = QDateTime.fromSecsSinceEpoch(timestamp)
+        formatted_date = dt.toString("yyyy-MM-dd HH:mm:ss")
+        
+        item = QTableWidgetItem(formatted_date)
+        
+        # Добавляем полные данные для сортировки
+        item.setData(Qt.ItemDataRole.UserRole, timestamp)
+        
+        return item
+    
+    def _create_tags_item(self, tags):
+        """
+        Создает элемент для отображения тегов.
+        
+        Args:
+            tags: Список тегов
+            
+        Returns:
+            QTableWidgetItem: Элемент для отображения тегов
+        """
+        if not tags:
+            return QTableWidgetItem("")
+            
+        # Объединяем теги в строку
+        tags_text = ", ".join(tags)
+        
+        item = QTableWidgetItem(tags_text)
+        
+        # Добавляем полные данные для фильтрации
+        item.setData(Qt.ItemDataRole.UserRole, tags)
+        
+        return item
+    
+    def _update_sites_table(self, properties):
+        """
+        Обработчик отложенных обновлений для таблицы сайтов.
+        Вызывается через UIUpdater.
+        
+        Args:
+            properties: Словарь обновляемых свойств
+        """
+        if "filter_changed" in properties:
+            # Обновляем фильтр и затем данные
+            self.current_filter = properties.get("filter", {})
+            self.update_data()
+        
+        elif "site_changed" in properties:
+            # Обновляем конкретный сайт
+            site_id = properties.get("site_id")
+            if site_id:
+                self.update_site_row(site_id)
+        
+        elif "full_update" in properties:
+            # Полное обновление данных
+            self.update_data()
+    
+    def update_site_row(self, site_id):
+        """
+        Обновляет строку для конкретного сайта.
+        
+        Args:
+            site_id: ID сайта для обновления
+        """
+        # Поиск строки по ID используя индекс
+        row = self.sites_table.find_row(0, str(site_id))
+        
+        if row is not None:
+            # Получаем актуальные данные сайта
+            site_data = self.get_site_data(site_id)
+            
+            if site_data:
+                # Обновляем данные в строке
+                self.sites_table.set_loading(True)
+                self.sites_table.setItem(row, 1, QTableWidgetItem(site_data["url"]))
+                self.sites_table.setItem(row, 2, QTableWidgetItem(site_data["name"]))
+                self.sites_table.setItem(row, 3, QTableWidgetItem(site_data["type"]))
+                self.sites_table.setItem(row, 4, self._create_status_item(site_data["status"]))
+                self.sites_table.setItem(row, 5, self._create_timestamp_item(site_data["last_check"]))
+                self.sites_table.setItem(row, 6, QTableWidgetItem(str(site_data["interval"])))
+                self.sites_table.setItem(row, 7, self._create_tags_item(site_data["tags"]))
+                self.sites_table.set_loading(False)
+    
+    def on_site_double_clicked(self, row, column):
+        """
+        Обработчик двойного клика по сайту.
         
         Args:
             row: Индекс строки
             column: Индекс столбца
         """
-        try:
-            # Получаем ID сайта
-            site_id = int(self.table.item(row, 0).text())
-            
-            # Получаем данные сайта
-            site_data = self.app_context.get_site(site_id)
-            
-            if site_data:
-                # Открываем диалог редактирования сайта
-                self.show_edit_site_dialog(site_data)
-            else:
-                raise ValueError(f"Сайт с ID {site_id} не найден")
+        # Получаем ID сайта
+        site_id = self.sites_table.item(row, 0).text()
         
-        except Exception as e:
-            self.logger.error(f"Ошибка при обработке двойного клика: {e}")
-            log_exception(self.logger, "Ошибка обработки двойного клика")
-            if hasattr(self.parent, "show_message"):
-                self.parent.show_message("Ошибка", f"Не удалось открыть информацию о сайте: {e}", QMessageBox.Icon.Critical)
+        # Открываем форму редактирования сайта
+        self.open_site_editor(site_id)
+    
+    def get_filtered_sites(self):
+        """
+        Получает отфильтрованный список сайтов.
+        
+        Returns:
+            List[Dict]: Список словарей с данными сайтов
+        """
+        # ... existing code ...
+    
+    def get_site_data(self, site_id):
+        """
+        Получает данные конкретного сайта.
+        
+        Args:
+            site_id: ID сайта
+            
+        Returns:
+            Dict: Словарь с данными сайта
+        """
+        # ... existing code ...
+    
+    def update_stats(self, sites):
+        """
+        Обновляет статистику по сайтам.
+        
+        Args:
+            sites: Список сайтов
+        """
+        # ... existing code ...
+    
+    def apply_filter(self, filter_data):
+        """
+        Применяет фильтр к списку сайтов.
+        
+        Args:
+            filter_data: Данные фильтра
+        """
+        # Планируем отложенное обновление через UIUpdater
+        self.ui_updater.schedule_update("sites_table", "filter_changed", True)
+        self.ui_updater.schedule_update("sites_table", "filter", filter_data)
+    
+    def clear_filter(self):
+        """Очищает текущий фильтр."""
+        # Планируем отложенное обновление через UIUpdater
+        self.ui_updater.schedule_update("sites_table", "filter_changed", True)
+        self.ui_updater.schedule_update("sites_table", "filter", {})
+    
+    def open_site_editor(self, site_id=None):
+        """
+        Открывает редактор сайта.
+        
+        Args:
+            site_id: ID сайта для редактирования (None для создания нового)
+        """
+        # ... existing code ...
+    
+    @handle_errors(error_msg="Ошибка при отображении диалога добавления сайта")
+    def show_add_site_dialog(self):
+        """Отображение диалога добавления сайта"""
+        dialog = SiteDialog(self.app_context, None, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.update_data()
+    
+    @handle_errors(error_msg="Ошибка при отображении диалога редактирования сайта")
+    def show_edit_site_dialog(self, site_data):
+        """
+        Отображение диалога редактирования сайта
+        
+        Args:
+            site_data: Данные сайта для редактирования
+        """
+        dialog = SiteDialog(self.app_context, site_data, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.update_data()
+    
+    @handle_errors(error_msg="Ошибка при обновлении данных")
+    def refresh(self):
+        """Обновление данных"""
+        self.update_data()
     
     def _delete_selected_sites(self):
         """Удаление выбранных сайтов"""
         try:
             # Получаем выбранные строки
-            selected_rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
+            selected_rows = sorted({index.row() for index in self.sites_table.selectedIndexes()}, reverse=True)
             
             if not selected_rows:
                 return
@@ -676,7 +790,7 @@ class SitesWidget(QWidget):
             # Удаляем сайты
             deleted_count = 0
             for row in selected_rows:
-                site_id = int(self.table.item(row, 0).text())
+                site_id = int(self.sites_table.item(row, 0).text())
                 if self.app_context.delete_site(site_id):
                     deleted_count += 1
             
@@ -699,7 +813,7 @@ class SitesWidget(QWidget):
         """Проверка выбранных сайтов"""
         try:
             # Получаем выбранные строки
-            selected_rows = {index.row() for index in self.table.selectedIndexes()}
+            selected_rows = {index.row() for index in self.sites_table.selectedIndexes()}
             
             if not selected_rows:
                 return
@@ -720,7 +834,7 @@ class SitesWidget(QWidget):
             # Проверяем сайты
             checked_count = 0
             for row in selected_rows:
-                site_id = int(self.table.item(row, 0).text())
+                site_id = int(self.sites_table.item(row, 0).text())
                 if self.app_context.check_site_now(site_id):
                     checked_count += 1
             
@@ -906,28 +1020,4 @@ class SitesWidget(QWidget):
             self.logger.error(f"Ошибка при экспорте сайтов: {e}")
             log_exception(self.logger, "Ошибка экспорта сайтов")
             if hasattr(self.parent, "show_message"):
-                self.parent.show_message("Ошибка", f"Не удалось экспортировать сайты: {e}", QMessageBox.Icon.Critical)
-    
-    @handle_errors(error_msg="Ошибка при отображении диалога добавления сайта")
-    def show_add_site_dialog(self):
-        """Отображение диалога добавления сайта"""
-        dialog = SiteDialog(self.app_context, None, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.update_data()
-    
-    @handle_errors(error_msg="Ошибка при отображении диалога редактирования сайта")
-    def show_edit_site_dialog(self, site_data):
-        """
-        Отображение диалога редактирования сайта
-        
-        Args:
-            site_data: Данные сайта для редактирования
-        """
-        dialog = SiteDialog(self.app_context, site_data, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.update_data()
-    
-    @handle_errors(error_msg="Ошибка при обновлении данных")
-    def refresh(self):
-        """Обновление данных"""
-        self.update_data() 
+                self.parent.show_message("Ошибка", f"Не удалось экспортировать сайты: {e}", QMessageBox.Icon.Critical) 

@@ -17,6 +17,8 @@ import webbrowser
 from typing import Dict, List, Any, Optional, Union
 
 from utils.logger import get_module_logger, log_exception
+from config.config import get_config
+from utils.http_client import get_http_client
 
 
 class NotificationManager:
@@ -327,7 +329,7 @@ class NotificationManager:
     
     def _send_telegram_notification(self, title, message, site_url=None, change_id=None):
         """
-        Отправка уведомления через Telegram
+        Отправляет уведомление через Telegram.
         
         Args:
             title: Заголовок уведомления
@@ -336,18 +338,20 @@ class NotificationManager:
             change_id: ID изменения (опционально)
             
         Returns:
-            bool: Результат отправки
+            bool: True, если уведомление отправлено успешно
         """
         try:
-            # Проверяем настройки Telegram
+            # Получаем настройки Telegram
             telegram_settings = self.settings['telegram_settings']
             
+            # Проверяем, включены ли Telegram-уведомления
+            if not telegram_settings.get('enabled', False):
+                return False
+            
+            # Проверяем наличие токена бота и ID чата
             if not telegram_settings['bot_token'] or not telegram_settings['chat_id']:
                 self.logger.warning("Не настроены параметры Telegram для отправки уведомлений")
                 return False
-            
-            # Импортируем модуль для работы с HTTP-запросами
-            import requests
             
             # Формируем сообщение
             telegram_message = f"{title}\n\n{message}"
@@ -370,20 +374,32 @@ class NotificationManager:
                 'parse_mode': 'HTML'
             }
             
-            # Отправляем запрос
-            response = requests.get(api_url, params=params)
+            # Добавляем параметры для отправки с дизайном
+            if telegram_settings.get('use_markdown', False):
+                params['parse_mode'] = 'MarkdownV2'
             
-            # Проверяем результат
+            # Получаем HTTP-клиент
+            http_client = get_http_client()
+            
+            # Отправляем запрос с помощью HTTP-клиента
+            response = http_client.post(
+                url=api_url,
+                json=params,
+                timeout=10,
+                retries=2
+            )
+            
+            # Проверяем ответ
             if response.status_code == 200:
-                self.logger.info("Уведомление через Telegram отправлено успешно")
+                self.logger.info("Уведомление в Telegram отправлено успешно")
                 return True
             else:
-                self.logger.warning(f"Ошибка при отправке уведомления через Telegram: {response.status_code} - {response.text}")
+                self.logger.error(f"Ошибка при отправке в Telegram. Код: {response.status_code}, Ответ: {response.text}")
                 return False
-        
+                
         except Exception as e:
-            self.logger.error(f"Ошибка при отправке уведомления через Telegram: {e}")
-            log_exception(self.logger, "Ошибка отправки уведомления через Telegram")
+            self.logger.error(f"Ошибка при отправке уведомления в Telegram: {e}")
+            log_exception(self.logger, "Ошибка отправки Telegram")
             return False
     
     def test_notification(self, notification_type):

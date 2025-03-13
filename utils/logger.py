@@ -4,12 +4,14 @@
 """
 Модуль настройки логирования для WDM_V12.
 Настраивает систему логирования с выводом в файл и консоль.
+Поддерживает разные уровни логирования для разных сред исполнения.
 """
 
 import os
 import logging
 import logging.handlers
 import sys
+import json
 from pathlib import Path
 import colorlog
 
@@ -31,71 +33,140 @@ LOG_COLORS = {
     'CRITICAL': 'red,bg_white',
 }
 
+# Настройки логирования для разных сред
+ENVIRONMENT_SETTINGS = {
+    'development': {
+        'log_level': 'DEBUG',
+        'console_output': True,
+        'file_output': True,
+        'log_rotation': True,
+        'max_file_size_mb': 10,
+        'backup_count': 5,
+        'detailed_tracebacks': True
+    },
+    'testing': {
+        'log_level': 'INFO',
+        'console_output': True,
+        'file_output': True,
+        'log_rotation': True,
+        'max_file_size_mb': 5,
+        'backup_count': 3,
+        'detailed_tracebacks': True
+    },
+    'production': {
+        'log_level': 'WARNING',
+        'console_output': False,
+        'file_output': True,
+        'log_rotation': True,
+        'max_file_size_mb': 20,
+        'backup_count': 10,
+        'detailed_tracebacks': False
+    }
+}
 
-def setup_logger(log_level=None, console_output=True):
+# Текущая среда исполнения (по умолчанию - development)
+CURRENT_ENVIRONMENT = os.environ.get('WDM_ENVIRONMENT', 'development')
+
+
+def get_environment_settings():
     """
-    Настраивает логирование с указанным уровнем и опцией вывода в консоль
+    Получение настроек логирования для текущей среды
+    
+    Returns:
+        dict: Настройки логирования
+    """
+    # Проверяем наличие файла с настройками
+    settings_file = BASE_DIR / "config" / "logging_settings.json"
+    
+    if settings_file.exists():
+        try:
+            with open(settings_file, 'r', encoding='utf-8') as f:
+                custom_settings = json.load(f)
+                
+            if CURRENT_ENVIRONMENT in custom_settings:
+                return custom_settings[CURRENT_ENVIRONMENT]
+        except Exception as e:
+            print(f"Ошибка при чтении настроек логирования: {e}")
+    
+    # Если файла нет или произошла ошибка, используем стандартные настройки
+    return ENVIRONMENT_SETTINGS.get(CURRENT_ENVIRONMENT, ENVIRONMENT_SETTINGS['development'])
+
+
+def setup_logger(log_level=None, console_output=None, environment=None):
+    """
+    Настраивает логирование с указанным уровнем и опциями в зависимости от среды
     
     Args:
         log_level: Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         console_output: Флаг вывода логов в консоль
+        environment: Среда исполнения (development, testing, production)
     """
     # Если директория логов не существует, создаем её
     if not os.path.exists(LOGS_DIR):
         os.makedirs(LOGS_DIR)
+    
+    # Определяем текущую среду и её настройки
+    global CURRENT_ENVIRONMENT
+    if environment:
+        CURRENT_ENVIRONMENT = environment
         
-    # Получаем уровень логирования из конфигурации
+    settings = get_environment_settings()
+    
+    # Используем параметры из настроек, если не указаны явно
     if log_level is None:
-        try:
-            # Импорт конфигурации здесь, чтобы избежать циклического импорта
-            from config.config import get_config
-            config = get_config()
-            log_level = config['logging']['level']
-            console_output = config['logging']['console_output']
-            max_file_size = config['logging']['max_file_size_mb'] * 1024 * 1024  # в байтах
-            backup_count = config['logging']['backup_count']
-        except (ImportError, KeyError):
-            log_level = 'INFO'
-            console_output = True
-            max_file_size = 10 * 1024 * 1024  # 10 МБ
-            backup_count = 5
+        log_level = settings['log_level']
+    if console_output is None:
+        console_output = settings['console_output']
     
-    # Преобразуем строковый уровень в константу logging
-    numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+    # Преобразуем строковый уровень логирования в константу
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        numeric_level = logging.INFO
     
-    # Настраиваем корневой логгер
-    root_logger = logging.getLogger('wdm')
+    # Настройка корневого логгера
+    root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
     
-    # Удаляем существующие обработчики, если они есть
-    for handler in root_logger.handlers[:]:
+    # Очищаем существующие обработчики
+    for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
     
-    # Создаем форматтер для файла
-    file_formatter = logging.Formatter(FILE_LOG_FORMAT)
+    # Настройка обработчика для записи в файл
+    if settings['file_output']:
+        log_file = os.path.join(LOGS_DIR, "wdm_v12.log")
+        
+        if settings['log_rotation']:
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_file,
+                maxBytes=settings['max_file_size_mb'] * 1024 * 1024,
+                backupCount=settings['backup_count'],
+                encoding='utf-8'
+            )
+        else:
+            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        
+        file_formatter = logging.Formatter(FILE_LOG_FORMAT)
+        file_handler.setFormatter(file_formatter)
+        file_handler.setLevel(numeric_level)
+        root_logger.addHandler(file_handler)
     
-    # Создаем обработчик для файла с ротацией
-    log_file = os.path.join(LOGS_DIR, 'wdm.log')
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=max_file_size, backupCount=backup_count, encoding='utf-8'
-    )
-    file_handler.setFormatter(file_formatter)
-    root_logger.addHandler(file_handler)
-    
-    # Если нужен вывод в консоль, добавляем соответствующий обработчик
+    # Настройка обработчика для вывода в консоль
     if console_output:
-        # Создаем цветной форматтер для консоли
+        console_handler = logging.StreamHandler()
         console_formatter = colorlog.ColoredFormatter(
             CONSOLE_LOG_FORMAT,
             log_colors=LOG_COLORS
         )
-        console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(console_formatter)
+        console_handler.setLevel(numeric_level)
         root_logger.addHandler(console_handler)
     
-    # Логируем информацию о начале логирования
-    root_logger.debug(f"Логирование настроено. Уровень: {log_level}, "
-                     f"файл: {log_file}, вывод в консоль: {console_output}")
+    # Установка перехватчика необработанных исключений
+    sys.excepthook = handle_uncaught_exception
+    
+    # Создаем логгер для этого модуля
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Логирование настроено для среды {CURRENT_ENVIRONMENT} с уровнем {log_level}")
     
     return root_logger
 

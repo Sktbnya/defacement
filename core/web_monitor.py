@@ -33,6 +33,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 # Внутренние импорты
 from utils.logger import get_module_logger, log_exception
 from config.config import get_config
+from utils.cache_manager import get_snapshot_cache
+from utils.http_client import get_http_client
+from core.web_driver_manager import driver_context  # Импортируем контекстный менеджер драйвера
 
 
 class WebMonitor:
@@ -248,116 +251,164 @@ class WebMonitor:
     
     def _get_content_dynamic(self, site_data: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
         """
-        Получение контента сайта с помощью Selenium (динамический режим)
+        Получение контента сайта в динамическом режиме (с помощью Selenium).
         
         Args:
-            site_data: Данные сайта
+            site_data: Данные о сайте
             
         Returns:
-            Tuple[Optional[str], Optional[str]]: (контент, ошибка)
+            Tuple[Optional[str], Optional[str]]: HTML-контент и сообщение об ошибке (если есть)
         """
-        url = site_data['url']
-        css_selector = site_data.get('css_selector')
-        xpath = site_data.get('xpath')
-        
         try:
-            if not self.initialize_browser():
-                return None, "Не удалось инициализировать браузер"
+            self.logger.debug(f"Получение динамического контента для URL: {site_data['url']}")
             
-            # Загрузка страницы
-            self.logger.debug(f"Загрузка страницы {url} в динамическом режиме")
-            self.driver.get(url)
+            # Параметры для Selenium
+            timeout = site_data.get('timeout', 30)
+            wait_for_selector = site_data.get('wait_for_selector')
+            wait_for_xpath = site_data.get('wait_for_xpath')
+            wait_time = site_data.get('wait_time', 0)
+            scroll_to_bottom = site_data.get('scroll_to_bottom', False)
+            click_selectors = site_data.get('click_selectors', [])
+            css_selector = site_data.get('css_selector')
+            xpath = site_data.get('xpath')
             
-            # Ожидание загрузки страницы
-            wait_time = self.config['browser']['wait_time_seconds']
+            # Создаем пользовательские настройки для драйвера
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
             
-            # Делаем скриншот для отладки и архивирования
-            screenshot_path = self._take_screenshot(site_data['id'])
+            # Отключаем изображения для ускорения загрузки
+            chrome_options.add_argument('--blink-settings=imagesEnabled=false')
             
-            # Получение контента
-            if css_selector:
-                # Ожидание появления элемента по CSS селектору
-                try:
-                    element = WebDriverWait(self.driver, wait_time).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, css_selector))
+            # Устанавливаем размер окна
+            chrome_options.add_argument('--window-size=1920,1080')
+            
+            # Устанавливаем User-Agent
+            user_agent = site_data.get('user_agent') or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
+            chrome_options.add_argument(f'--user-agent={user_agent}')
+            
+            # Используем контекстный менеджер для работы с драйвером
+            with driver_context(chrome_options) as driver:
+                # Открываем страницу
+                driver.get(site_data['url'])
+                
+                # Ожидаем загрузки элемента, если указан
+                if wait_for_selector:
+                    self.logger.debug(f"Ожидание селектора: {wait_for_selector}")
+                    WebDriverWait(driver, timeout).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, wait_for_selector))
                     )
-                    html = element.get_attribute('outerHTML')
-                except (TimeoutException, NoSuchElementException) as e:
-                    self.logger.warning(f"Элемент по CSS селектору не найден: {e}")
-                    html = self.driver.page_source
-            elif xpath:
-                # Ожидание появления элемента по XPath
-                try:
-                    element = WebDriverWait(self.driver, wait_time).until(
-                        EC.presence_of_element_located((By.XPATH, xpath))
+                
+                if wait_for_xpath:
+                    self.logger.debug(f"Ожидание XPath: {wait_for_xpath}")
+                    WebDriverWait(driver, timeout).until(
+                        EC.presence_of_element_located((By.XPATH, wait_for_xpath))
                     )
-                    html = element.get_attribute('outerHTML')
-                except (TimeoutException, NoSuchElementException) as e:
-                    self.logger.warning(f"Элемент по XPath не найден: {e}")
-                    html = self.driver.page_source
-            else:
-                # Если селектор не указан, берем весь HTML
-                html = self.driver.page_source
-            
-            # Фильтрация контента по регулярным выражениям
-            html = self._filter_content(html, site_data)
-            
-            return html, None
-        
+                
+                # Дополнительное ожидание, если указано
+                if wait_time > 0:
+                    self.logger.debug(f"Дополнительное ожидание: {wait_time} сек.")
+                    time.sleep(wait_time)
+                
+                # Прокрутка страницы вниз, если требуется
+                if scroll_to_bottom:
+                    self.logger.debug("Прокрутка страницы вниз")
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    # Даем время на подгрузку контента
+                    time.sleep(1)
+                
+                # Клик по элементам, если указаны
+                for selector in click_selectors:
+                    try:
+                        self.logger.debug(f"Клик по селектору: {selector}")
+                        element = WebDriverWait(driver, 5).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                        )
+                        driver.execute_script("arguments[0].click();", element)
+                        # Небольшая пауза после клика
+                        time.sleep(0.5)
+                    except Exception as e:
+                        self.logger.warning(f"Не удалось кликнуть по селектору {selector}: {e}")
+                
+                # Получаем HTML страницы
+                html = driver.page_source
+                
+                # Если нужно извлечь конкретный элемент
+                if css_selector or xpath:
+                    try:
+                        if css_selector:
+                            self.logger.debug(f"Извлечение по CSS-селектору: {css_selector}")
+                            element = driver.find_element(By.CSS_SELECTOR, css_selector)
+                            html = element.get_attribute('outerHTML')
+                        elif xpath:
+                            self.logger.debug(f"Извлечение по XPath: {xpath}")
+                            element = driver.find_element(By.XPATH, xpath)
+                            html = element.get_attribute('outerHTML')
+                    except NoSuchElementException:
+                        self.logger.warning(f"Элемент не найден: {css_selector or xpath}")
+                
+                # Фильтрация контента по регулярным выражениям
+                html = self._filter_content(html, site_data)
+                
+                return html, None
+                
+        except TimeoutException as e:
+            error_msg = f"Тайм-аут при загрузке страницы: {e}"
+            self.logger.error(error_msg)
+            return None, error_msg
+        except WebDriverException as e:
+            error_msg = f"Ошибка WebDriver: {e}"
+            self.logger.error(error_msg)
+            return None, error_msg
         except Exception as e:
             self.logger.error(f"Ошибка при получении контента в динамическом режиме: {e}")
             log_exception(self.logger, "Ошибка динамического получения контента")
-            
-            # Пытаемся закрыть и переинициализировать браузер
-            self.close_browser()
-            
             return None, str(e)
     
     def _get_content_static(self, site_data: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
         """
-        Получение контента сайта с помощью requests (статический режим)
+        Получение контента сайта в статическом режиме (с помощью HTTP-запроса).
         
         Args:
-            site_data: Данные сайта
+            site_data: Данные о сайте
             
         Returns:
-            Tuple[Optional[str], Optional[str]]: (контент, ошибка)
+            Tuple[Optional[str], Optional[str]]: HTML-контент и сообщение об ошибке (если есть)
         """
         url = site_data['url']
-        css_selector = site_data.get('css_selector')
-        xpath = site_data.get('xpath')
+        css_selector = site_data.get('css_selector', None)
+        xpath = site_data.get('xpath', None)
         
         try:
-            # Настройка заголовков запроса
-            headers = {
-                'User-Agent': self.config['browser']['user_agent'],
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Cache-Control': 'max-age=0',
-                'Upgrade-Insecure-Requests': '1'
-            }
+            self.logger.debug(f"Получение статического контента для URL: {url}")
             
-            # Выполнение запроса с учетом таймаута и повторных попыток
-            timeout = self.config['monitoring']['timeout_seconds']
-            retries = self.config['monitoring']['retries']
-            retry_delay = self.config['monitoring']['retry_delay_seconds']
+            # Параметры запроса
+            headers = site_data.get('headers', {})
+            timeout = site_data.get('timeout', 30)
+            retries = site_data.get('retries', 3)
+            retry_delay = site_data.get('retry_delay', 1)
             
-            self.logger.debug(f"Загрузка страницы {url} в статическом режиме")
+            # Если заголовки не указаны, используем стандартные
+            if not headers:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+                }
             
-            # Повторяем запрос при необходимости
-            for attempt in range(retries):
-                try:
-                    response = requests.get(url, headers=headers, timeout=timeout)
-                    response.raise_for_status()  # Проверка статуса ответа
-                    break
-                except requests.RequestException as e:
-                    if attempt < retries - 1:
-                        self.logger.warning(f"Попытка {attempt+1}/{retries} не удалась: {e}. Повтор через {retry_delay} сек.")
-                        time.sleep(retry_delay)
-                    else:
-                        raise
+            # Получаем HTTP-клиент
+            http_client = get_http_client()
+            
+            # Выполняем запрос с повторными попытками через HTTP-клиент
+            response = http_client.get(
+                url=url, 
+                headers=headers, 
+                timeout=timeout, 
+                retries=retries, 
+                retry_delay=retry_delay
+            )
             
             # Получение HTML из ответа
             html = response.text
@@ -529,16 +580,29 @@ class WebMonitor:
             Tuple[float, Dict[str, Any]]: Процент изменений и структурированная информация о изменениях
         """
         try:
-            # Чтение файлов
-            with open(old_path, 'r', encoding='utf-8') as f:
-                old_content = f.read()
+            # Используем кэш снимков для чтения файлов
+            cache = get_snapshot_cache()
             
-            with open(new_path, 'r', encoding='utf-8') as f:
-                new_content = f.read()
+            # Чтение файлов из кэша
+            old_content = cache.get_snapshot_content(old_path)
+            new_content = cache.get_snapshot_content(new_path)
+            
+            if old_content is None or new_content is None:
+                self.logger.error(f"Не удалось прочитать контент из файлов {old_path} и/или {new_path}")
+                return 0.0, {'error': 'Не удалось прочитать контент'}
             
             # Разбиение на строки
             old_lines = old_content.splitlines()
             new_lines = new_content.splitlines()
+            
+            # Проверка на слишком большие документы
+            max_lines = 5000  # Максимальное количество строк для полного сравнения
+            
+            if len(old_lines) > max_lines or len(new_lines) > max_lines:
+                self.logger.warning(f"Файлы слишком большие для полного сравнения: {len(old_lines)} и {len(new_lines)} строк")
+                
+                # Оптимизированное сравнение для больших документов
+                return self._compare_large_documents(old_lines, new_lines)
             
             # Вычисление различий
             differ = difflib.Differ()
@@ -578,8 +642,284 @@ class WebMonitor:
             log_exception(self.logger, "Ошибка сравнения контента")
             return 0.0, {'error': str(e)}
     
+    def _compare_large_documents(self, old_lines: List[str], new_lines: List[str]) -> Tuple[float, Dict[str, Any]]:
+        """
+        Оптимизированное сравнение больших документов с использованием выборочного сравнения
+        и хеширования секций документа
+        
+        Args:
+            old_lines: Строки старого документа
+            new_lines: Строки нового документа
+            
+        Returns:
+            Tuple[float, Dict[str, Any]]: Процент изменений и структурированная информация о изменениях
+        """
+        try:
+            # Определяем размер блока для сравнения (меньшие блоки для больших документов)
+            block_size = min(500, max(100, min(len(old_lines), len(new_lines)) // 20))
+            
+            # Функция для вычисления хеша блока строк
+            def hash_block(lines, start, size):
+                block = ''.join(lines[start:start+size])
+                return hashlib.md5(block.encode('utf-8')).hexdigest()
+            
+            # Разбиваем документы на блоки и сравниваем хеши блоков
+            old_blocks = [hash_block(old_lines, i, block_size) 
+                          for i in range(0, len(old_lines), block_size)]
+            new_blocks = [hash_block(new_lines, i, block_size) 
+                          for i in range(0, len(new_lines), block_size)]
+            
+            # Количество измененных блоков
+            different_blocks = sum(1 for old, new in zip(old_blocks, new_blocks) if old != new)
+            
+            # Учитываем разницу в количестве блоков
+            total_blocks = max(len(old_blocks), len(new_blocks))
+            added_blocks = max(0, len(new_blocks) - len(old_blocks))
+            removed_blocks = max(0, len(old_blocks) - len(new_blocks))
+            
+            # Вычисление процента изменений
+            if total_blocks > 0:
+                diff_percent = ((different_blocks + added_blocks + removed_blocks) / total_blocks) * 100
+            else:
+                diff_percent = 0.0
+            
+            # Создание структурированной информации о изменениях
+            changes = {
+                'added_blocks': added_blocks,
+                'removed_blocks': removed_blocks,
+                'changed_blocks': different_blocks,
+                'total_blocks': total_blocks,
+                'diff_percent': diff_percent,
+                'is_approximation': True,
+                'block_size': block_size
+            }
+            
+            self.logger.debug(f"Приблизительное сравнение больших документов: {diff_percent:.2f}% изменений")
+            return diff_percent, changes
+        
+        except Exception as e:
+            self.logger.error(f"Ошибка при сравнении больших документов: {e}")
+            log_exception(self.logger, "Ошибка сравнения больших документов")
+            return 0.0, {'error': str(e)}
+    
     def close(self):
         """Закрытие монитора и освобождение ресурсов"""
         self.logger.debug("Закрытие WebMonitor")
         self.close_browser()
-        self.logger.debug("WebMonitor закрыт успешно") 
+        self.logger.debug("WebMonitor закрыт успешно")
+
+class BrowserContextManager:
+    """
+    Контекстный менеджер для работы с веб-драйвером.
+    Гарантирует возврат ресурса даже при возникновении исключений.
+    """
+    
+    def __init__(self, web_monitor):
+        """
+        Инициализация контекстного менеджера
+        
+        Args:
+            web_monitor: Объект WebMonitor, содержащий драйвер
+        """
+        self.web_monitor = web_monitor
+        self.logger = get_module_logger('core.web_monitor.browser_manager')
+        self.driver = None
+    
+    def __enter__(self):
+        """
+        Вход в контекстный блок
+        
+        Returns:
+            webdriver: Инициализированный веб-драйвер
+        """
+        self.logger.debug("Вход в контекстный блок для работы с браузером")
+        
+        # Инициализируем браузер, если не инициализирован
+        if not self.web_monitor.driver:
+            success = self.web_monitor.initialize_browser()
+            if not success:
+                self.logger.error("Не удалось инициализировать браузер")
+                raise RuntimeError("Не удалось инициализировать браузер")
+        
+        self.driver = self.web_monitor.driver
+        return self.driver
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Выход из контекстного блока
+        
+        Args:
+            exc_type: Тип исключения, если оно возникло
+            exc_val: Значение исключения
+            exc_tb: Трассировка исключения
+            
+        Returns:
+            bool: Флаг обработки исключения
+        """
+        # Логируем исключение, если оно возникло
+        if exc_type:
+            self.logger.error(f"Произошло исключение при работе с браузером: {exc_val}")
+            log_exception(self.logger, "Ошибка при работе с браузером")
+        
+        # Проверяем состояние драйвера
+        try:
+            if self.driver:
+                # Проверяем, что сессия активна
+                self.driver.current_window_handle  # Это вызовет исключение, если драйвер разрушен
+        except Exception as e:
+            self.logger.warning(f"Драйвер браузера в некорректном состоянии: {e}")
+            # Если драйвер в некорректном состоянии, закрываем и сбрасываем его
+            try:
+                self.web_monitor.close_browser()
+                self.web_monitor.driver = None
+            except Exception as close_error:
+                self.logger.error(f"Ошибка при закрытии драйвера: {close_error}")
+        
+        self.logger.debug("Выход из контекстного блока для работы с браузером")
+        return False  # Не подавляем исключения
+
+def get_browser(self):
+    """
+    Получение браузера через контекстный менеджер
+    
+    Returns:
+        BrowserContextManager: Контекстный менеджер для работы с браузером
+    """
+    return BrowserContextManager(self)
+
+def _get_content_dynamic(self, site_data: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Получение динамического контента сайта с использованием Selenium
+    
+    Args:
+        site_data: Данные о сайте
+        
+    Returns:
+        Tuple[Optional[str], Optional[str]]: HTML-контент и текстовое содержимое сайта
+    """
+    url = site_data.get('url')
+    site_id = site_data.get('id')
+    wait_time = site_data.get('wait_time', self.config['monitoring']['page_wait_seconds'])
+    
+    self.logger.debug(f"Получение динамического контента для сайта {site_id}: {url}")
+    
+    html_content = None
+    text_content = None
+    
+    # Используем контекстный менеджер для работы с браузером
+    with self.get_browser() as driver:
+        try:
+            # Загрузка страницы
+            self.logger.debug(f"Загрузка страницы {url}")
+            driver.get(url)
+            
+            # Ожидание загрузки страницы
+            self.logger.debug(f"Ожидание загрузки страницы {wait_time} сек.")
+            time.sleep(wait_time)
+            
+            # Получение HTML-контента
+            html_content = driver.page_source
+            
+            # Получение текстового содержимого
+            body_element = driver.find_element(By.TAG_NAME, 'body')
+            text_content = body_element.text
+            
+            # Фильтрация контента по настройкам сайта
+            html_content = self._filter_content(html_content, site_data)
+            
+            # Создание скриншота
+            self._take_screenshot(site_id)
+            
+            self.logger.debug(f"Динамический контент для сайта {site_id} получен успешно")
+            
+        except TimeoutException:
+            self.logger.error(f"Таймаут при загрузке страницы {url}")
+            self.error_count += 1
+            
+        except WebDriverException as e:
+            self.logger.error(f"Ошибка браузера при загрузке {url}: {e}")
+            log_exception(self.logger, f"Ошибка браузера для сайта {site_id}")
+            self.error_count += 1
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при получении динамического контента {url}: {e}")
+            log_exception(self.logger, f"Ошибка получения контента для сайта {site_id}")
+            self.error_count += 1
+    
+    return html_content, text_content
+
+def _get_static_content(self, url: str, site_data: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Получение контента сайта в статическом режиме (с помощью HTTP-запроса).
+    
+    Args:
+        url: URL сайта
+        site_data: Данные о сайте
+        
+    Returns:
+        Tuple[Optional[str], Optional[str]]: HTML-контент и сообщение об ошибке (если есть)
+    """
+    try:
+        self.logger.debug(f"Получение статического контента для URL: {url}")
+        
+        # Параметры запроса
+        headers = site_data.get('headers', {})
+        timeout = site_data.get('timeout', 30)
+        retries = site_data.get('retries', 3)
+        retry_delay = site_data.get('retry_delay', 1)
+        css_selector = site_data.get('css_selector', None)
+        xpath = site_data.get('xpath', None)
+        
+        # Если заголовки не указаны, используем стандартные
+        if not headers:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+            }
+        
+        # Получаем HTTP-клиент
+        http_client = get_http_client()
+        
+        # Выполняем запрос с повторными попытками через HTTP-клиент
+        response = http_client.get(
+            url=url, 
+            headers=headers, 
+            timeout=timeout, 
+            retries=retries, 
+            retry_delay=retry_delay
+        )
+        
+        # Получение HTML из ответа
+        html = response.text
+        
+        # Если нужно извлечь конкретный элемент
+        if css_selector or xpath:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            if css_selector:
+                element = soup.select_one(css_selector)
+                if element:
+                    html = str(element)
+                else:
+                    self.logger.warning(f"Элемент по CSS селектору {css_selector} не найден")
+            elif xpath:
+                # BeautifulSoup не поддерживает XPath напрямую, используем lxml
+                from lxml import etree
+                
+                dom = etree.HTML(html)
+                elements = dom.xpath(xpath)
+                if elements:
+                    html = etree.tostring(elements[0], encoding='unicode')
+                else:
+                    self.logger.warning(f"Элемент по XPath {xpath} не найден")
+        
+        # Фильтрация контента по регулярным выражениям
+        html = self._filter_content(html, site_data)
+        
+        return html, None
+    
+    except Exception as e:
+        self.logger.error(f"Ошибка при получении контента в статическом режиме: {e}")
+        log_exception(self.logger, "Ошибка статического получения контента")
+        return None, str(e) 

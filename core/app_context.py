@@ -13,12 +13,14 @@ import threading
 import json
 from typing import Dict, List, Any, Optional, Union
 import datetime
+import sys
 
 from config.config import get_config, save_config
 from utils.logger import get_module_logger, log_exception
 from database.db_manager import DBManager
 from database.schema import DatabaseSchema
 from core.settings import Settings
+from utils.http_client import get_http_client
 
 
 class AppContext:
@@ -1330,4 +1332,116 @@ class AppContext:
             
             # Обновляем статус приложения
             self.update_status(is_ready=False, errors=[str(e)])
+            return False
+    
+    def check_for_updates(self) -> dict:
+        """
+        Проверяет наличие обновлений программы на сервере.
+        
+        Returns:
+            dict: Информация об обновлении или пустой словарь, если обновлений нет
+        """
+        try:
+            self.logger.debug("Проверка наличия обновлений")
+            
+            # Получаем текущую версию программы
+            current_version = self.app_version
+            
+            # URL сервера обновлений (замените на фактический URL)
+            update_server_url = self.config.get('update_server_url', 'https://example.com/updates/api/check')
+            
+            # Параметры запроса
+            params = {
+                'version': current_version,
+                'platform': sys.platform,
+                'app_id': 'wdm_v12'
+            }
+            
+            # Получаем HTTP-клиент
+            http_client = get_http_client()
+            
+            # Выполняем запрос к серверу обновлений
+            response = http_client.get(
+                url=update_server_url,
+                params=params,
+                timeout=10,
+                retries=2
+            )
+            
+            # Проверяем ответ
+            if response.status_code == 200:
+                update_info = response.json()
+                
+                # Проверяем, есть ли доступное обновление
+                if update_info.get('update_available', False):
+                    self.logger.info(f"Доступно обновление: {update_info.get('version')}")
+                    return update_info
+                else:
+                    self.logger.debug("Обновлений не найдено")
+                    return {}
+            else:
+                self.logger.warning(f"Ошибка при проверке обновлений. Код: {response.status_code}")
+                return {}
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка при проверке обновлений: {e}")
+            log_exception(self.logger, "Ошибка проверки обновлений")
+            return {}
+    
+    def download_update(self, update_info: dict) -> bool:
+        """
+        Скачивает обновление программы.
+        
+        Args:
+            update_info: Информация об обновлении
+            
+        Returns:
+            bool: True, если обновление успешно скачано
+        """
+        try:
+            self.logger.info(f"Начало загрузки обновления версии {update_info.get('version')}")
+            
+            # URL для скачивания обновления
+            download_url = update_info.get('download_url')
+            if not download_url:
+                self.logger.error("URL для скачивания обновления не указан")
+                return False
+            
+            # Путь для сохранения файла обновления
+            update_dir = os.path.join(self.app_dir, 'updates')
+            os.makedirs(update_dir, exist_ok=True)
+            
+            file_name = f"update_v{update_info.get('version')}.zip"
+            download_path = os.path.join(update_dir, file_name)
+            
+            # Получаем HTTP-клиент
+            http_client = get_http_client()
+            
+            # Скачиваем файл обновления
+            success = http_client.download_file(
+                url=download_url,
+                destination=download_path,
+                timeout=120,  # Увеличенный тайм-аут для скачивания
+                retries=3
+            )
+            
+            if success:
+                self.logger.info(f"Обновление успешно скачано: {download_path}")
+                
+                # Сохраняем информацию об обновлении
+                self.update_info = {
+                    'version': update_info.get('version'),
+                    'file_path': download_path,
+                    'release_notes': update_info.get('release_notes'),
+                    'download_time': time.time()
+                }
+                
+                return True
+            else:
+                self.logger.error("Не удалось скачать обновление")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка при скачивании обновления: {e}")
+            log_exception(self.logger, "Ошибка загрузки обновления")
             return False 

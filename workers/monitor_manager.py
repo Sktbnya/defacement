@@ -449,6 +449,7 @@ class MonitorManager:
         
         # Пул работников
         self.workers = []
+        self.worker_contexts = []  # Список контекстных менеджеров работников
         self.max_workers = self.config['monitoring']['max_workers']
         
         # Словарь задач (ключ - ID сайта, значение - задача)
@@ -489,6 +490,10 @@ class MonitorManager:
                 self.logger.warning(f"Обнаружены работники ({len(self.workers)}) при неактивном менеджере, очищаем список")
                 self.workers.clear()
             
+            if self.worker_contexts:
+                self.logger.warning(f"Обнаружены контексты работников ({len(self.worker_contexts)}) при неактивном менеджере, очищаем список")
+                self.worker_contexts.clear()
+            
             # Проверяем очереди
             if not self.task_queue.empty() or not self.result_queue.empty():
                 self.logger.warning(f"Обнаружены незавершенные задачи при запуске менеджера [{start_id}], очищаем очереди")
@@ -510,19 +515,22 @@ class MonitorManager:
             # Сбрасываем событие остановки
             self.stop_event.clear()
             
-            # Создаем и запускаем работников
+            # Создаем и запускаем работников, используя контекстный менеджер
             worker_start_errors = 0
             for i in range(self.max_workers):
                 try:
-                    worker = MonitorWorker(
+                    # Используем контекстный менеджер для создания работника
+                    worker_ctx = WorkerContextManager(
                         self.app_context, 
                         self.task_queue, 
                         self.result_queue, 
                         worker_id=f"worker-{i+1}"
                     )
-                    worker.start()
+                    # Входим в контекст и получаем работника
+                    worker = worker_ctx.__enter__()
                     self.workers.append(worker)
-                    self.logger.debug(f"Запущен работник {worker.worker_id}")
+                    self.worker_contexts.append(worker_ctx)  # Сохраняем контекстный менеджер
+                    self.logger.debug(f"Запущен работник {worker.worker_id} через контекстный менеджер")
                 except Exception as worker_err:
                     self.logger.error(f"Ошибка при создании и запуске работника #{i+1}: {worker_err}")
                     worker_start_errors += 1
@@ -620,63 +628,46 @@ class MonitorManager:
                 except Exception as stop_signal_err:
                     self.logger.error(f"Ошибка при добавлении сигналов остановки: {stop_signal_err}")
             
-            # Ожидаем завершения работников с таймаутами и повторными попытками
+            # Используем контекстные менеджеры для корректного завершения работников
             worker_errors = 0
-            for worker in list(self.workers):
+            
+            # Сначала пытаемся остановить через контекстный менеджер
+            for worker_ctx in list(self.worker_contexts):
                 try:
-                    worker.stop()
-                    worker.join(timeout=3.0)  # Уменьшаем таймаут для ожидания
-                    
-                    # Если работник не завершился, попробуем еще раз после паузы
-                    if worker.is_alive():
-                        self.logger.warning(f"Работник {worker.worker_id} не завершился за 3 секунды, ждем еще 3 секунды")
-                        time.sleep(0.5)  # Короткая пауза
-                        worker.join(timeout=3.0)
-                        
-                        if worker.is_alive():
-                            self.logger.error(f"Работник {worker.worker_id} не завершился корректно после повторной попытки")
-                            worker_errors += 1
+                    # Если у контекстного менеджера есть связанный работник
+                    if worker_ctx.worker:
+                        worker_id = worker_ctx.worker.worker_id
+                        self.logger.debug(f"Остановка работника {worker_id} через контекстный менеджер")
+                        # Вызываем метод выхода из контекста
+                        worker_ctx.__exit__(None, None, None)
                 except Exception as worker_err:
-                    self.logger.error(f"Ошибка при остановке работника: {worker_err}")
+                    self.logger.error(f"Ошибка при остановке работника через контекстный менеджер: {worker_err}")
                     worker_errors += 1
             
-            # Очищаем список работников независимо от успеха остановки
+            # Очищаем списки работников и контекстных менеджеров
             self.workers.clear()
+            self.worker_contexts.clear()
             
             # Ожидаем завершения потока обработки результатов
-            result_thread_error = False
             if self.result_thread and self.result_thread.is_alive():
                 try:
-                    self.result_thread.join(timeout=5.0)
+                    self.result_thread.join(timeout=3.0)
                     if self.result_thread.is_alive():
-                        self.logger.warning("Поток обработки результатов не завершился за 5 секунд, ждем еще 5 секунд")
-                        self.result_thread.join(timeout=5.0)
-                        if self.result_thread.is_alive():
-                            self.logger.error("Поток обработки результатов не завершился корректно после повторной попытки")
-                            result_thread_error = True
+                        self.logger.warning(f"Поток обработки результатов не завершился за отведенное время [{stop_id}]")
                 except Exception as result_thread_err:
-                    self.logger.error(f"Ошибка при остановке потока обработки результатов: {result_thread_err}")
-                    result_thread_error = True
-            
-            # Сбрасываем ссылку на поток обработки результатов
-            self.result_thread = None
+                    self.logger.error(f"Ошибка при ожидании завершения потока обработки результатов: {result_thread_err}")
             
             # Ожидаем завершения потока планирования задач
-            scheduler_thread_error = False
             if self.scheduler_thread and self.scheduler_thread.is_alive():
                 try:
-                    self.scheduler_thread.join(timeout=5.0)
+                    self.scheduler_thread.join(timeout=3.0)
                     if self.scheduler_thread.is_alive():
-                        self.logger.warning("Поток планирования задач не завершился за 5 секунд, ждем еще 5 секунд")
-                        self.scheduler_thread.join(timeout=5.0)
-                        if self.scheduler_thread.is_alive():
-                            self.logger.error("Поток планирования задач не завершился корректно после повторной попытки")
-                            scheduler_thread_error = True
+                        self.logger.warning(f"Поток планирования задач не завершился за отведенное время [{stop_id}]")
                 except Exception as scheduler_thread_err:
-                    self.logger.error(f"Ошибка при остановке потока планирования задач: {scheduler_thread_err}")
-                    scheduler_thread_error = True
+                    self.logger.error(f"Ошибка при ожидании завершения потока планирования задач: {scheduler_thread_err}")
             
-            # Сбрасываем ссылку на поток планирования задач
+            # Сбрасываем ссылки на потоки
+            self.result_thread = None
             self.scheduler_thread = None
             
             # Очищаем очереди
@@ -728,11 +719,10 @@ class MonitorManager:
             
             # Подводим итоги остановки
             execution_time = time.time() - start_time
-            if worker_errors > 0 or result_thread_error or scheduler_thread_error or queue_errors > 0:
+            if worker_errors > 0:
                 self.logger.warning(
                     f"Менеджер задач мониторинга остановлен с предупреждениями [{stop_id}] за {execution_time:.3f} сек. "
-                    f"Ошибки работников: {worker_errors}, ошибка потока результатов: {result_thread_error}, "
-                    f"ошибка планировщика: {scheduler_thread_error}, ошибки очередей: {queue_errors}"
+                    f"Ошибки работников: {worker_errors}"
                 )
             else:
                 self.logger.info(f"Менеджер задач мониторинга остановлен успешно [{stop_id}] за {execution_time:.3f} сек")
@@ -1226,10 +1216,55 @@ class MonitorManager:
         
         self.logger.debug(f"Планировщик задач остановлен [{schedule_id}]")
     
+    def _cleanup_finished_workers(self):
+        """Очистка завершенных потоков из списка workers"""
+        try:
+            self.logger.debug("Очистка завершенных потоков")
+            
+            # Фиксируем исходное количество потоков
+            initial_workers_count = len(self.workers)
+            
+            # Фильтруем только живые потоки и сохраняем их индексы
+            active_worker_indices = []
+            active_workers = []
+            
+            for idx, worker in enumerate(self.workers):
+                if worker.is_alive():
+                    active_workers.append(worker)
+                    active_worker_indices.append(idx)
+            
+            # Если есть завершенные потоки, обновляем список
+            if len(active_workers) < initial_workers_count:
+                self.logger.info(f"Удаление {initial_workers_count - len(active_workers)} завершенных потоков")
+                self.workers = active_workers
+                
+                # Обновляем список контекстных менеджеров, сохраняя только те, которые соответствуют живым потокам
+                active_contexts = []
+                for idx in active_worker_indices:
+                    if idx < len(self.worker_contexts):  # Защита от выхода за границы
+                        active_contexts.append(self.worker_contexts[idx])
+                
+                # Если размеры не совпадают, логируем предупреждение
+                if len(active_contexts) != len(active_workers):
+                    self.logger.warning(f"Несоответствие количества активных работников ({len(active_workers)}) "
+                                       f"и контекстных менеджеров ({len(active_contexts)})")
+                
+                self.worker_contexts = active_contexts
+                
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при очистке завершенных потоков: {e}")
+            log_exception(self.logger, "Ошибка очистки завершенных потоков")
+            return False
+    
     def _perform_health_check(self):
         """Проверка здоровья системы мониторинга"""
         try:
             self.logger.debug("Выполнение проверки здоровья системы мониторинга")
+            
+            # Очистка завершенных потоков
+            self._cleanup_finished_workers()
             
             # Проверка очереди задач
             queue_size = self.task_queue.qsize()
@@ -1267,7 +1302,7 @@ class MonitorManager:
             self.logger.error(f"Ошибка при проверке здоровья системы: {e}")
             log_exception(self.logger, "Ошибка проверки здоровья")
             return False
-            
+    
     def _restart_inactive_workers(self):
         """Перезапуск неактивных работников"""
         try:
@@ -1276,21 +1311,34 @@ class MonitorManager:
             # Проходим по всем работникам и перезапускаем неактивные
             for i, worker in enumerate(self.workers):
                 if not worker.is_alive():
-                    self.logger.warning(f"Работник #{worker.worker_id} неактивен, перезапуск")
+                    worker_id = worker.worker_id
+                    self.logger.warning(f"Работник #{worker_id} неактивен, перезапуск")
                     
-                    # Создаем нового работника с тем же ID
-                    new_worker = MonitorWorker(
-                        self.app_context,
-                        self.task_queue,
-                        self.result_queue,
-                        worker_id=worker.worker_id
-                    )
-                    new_worker.daemon = True
-                    new_worker.start()
+                    # Если есть соответствующий контекстный менеджер, закрываем его
+                    if i < len(self.worker_contexts) and self.worker_contexts[i]:
+                        try:
+                            self.logger.debug(f"Закрытие контекстного менеджера для работника #{worker_id}")
+                            self.worker_contexts[i].__exit__(None, None, None)
+                        except Exception as ctx_err:
+                            self.logger.error(f"Ошибка при закрытии контекстного менеджера: {ctx_err}")
                     
-                    # Заменяем неактивного работника новым
-                    self.workers[i] = new_worker
-                    self.logger.info(f"Работник #{new_worker.worker_id} успешно перезапущен")
+                    # Создаем нового работника с тем же ID через контекстный менеджер
+                    new_worker, new_ctx = self.get_worker(worker_id=worker_id)
+                    
+                    if new_worker and new_ctx:
+                        # Заменяем неактивного работника и его контекстный менеджер
+                        self.workers[i] = new_worker
+                        
+                        # Обновляем контекстный менеджер, если индекс в пределах списка
+                        if i < len(self.worker_contexts):
+                            self.worker_contexts[i] = new_ctx
+                        else:
+                            # Если индекс за пределами списка, добавляем новый контекст
+                            self.worker_contexts.append(new_ctx)
+                            
+                        self.logger.info(f"Работник #{new_worker.worker_id} успешно перезапущен")
+                    else:
+                        self.logger.error(f"Не удалось перезапустить работника #{worker_id}")
                     
             return True
             
@@ -1694,3 +1742,121 @@ class MonitorManager:
                 'status': self.app_context.get_status(),
                 'error': str(e)
             } 
+
+    def get_worker(self, worker_id=None):
+        """
+        Создает и возвращает нового работника через контекстный менеджер
+        
+        Args:
+            worker_id: Идентификатор работника (опционально)
+            
+        Returns:
+            Tuple[MonitorWorker, WorkerContextManager]: Работник и его контекстный менеджер
+        """
+        try:
+            # Генерируем ID работника, если не указан
+            if not worker_id:
+                worker_id = f"worker-{len(self.workers) + 1}"
+                
+            self.logger.debug(f"Создание нового работника {worker_id} через контекстный менеджер")
+            
+            # Создаем контекстный менеджер
+            worker_ctx = WorkerContextManager(
+                self.app_context,
+                self.task_queue,
+                self.result_queue,
+                worker_id=worker_id
+            )
+            
+            # Входим в контекст и получаем работника
+            worker = worker_ctx.__enter__()
+            
+            return worker, worker_ctx
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при создании работника {worker_id}: {e}")
+            log_exception(self.logger, "Ошибка создания работника")
+            return None, None
+
+
+class WorkerContextManager:
+    """
+    Контекстный менеджер для безопасной работы с потоком мониторинга.
+    Гарантирует корректное освобождение ресурсов даже при возникновении исключений.
+    """
+    
+    def __init__(self, app_context, task_queue, result_queue, worker_id=None):
+        """
+        Инициализация контекстного менеджера
+        
+        Args:
+            app_context: Контекст приложения
+            task_queue: Очередь задач
+            result_queue: Очередь результатов
+            worker_id: Идентификатор работника (опционально)
+        """
+        self.logger = get_module_logger('workers.monitor_manager.worker_ctx')
+        self.app_context = app_context
+        self.task_queue = task_queue
+        self.result_queue = result_queue
+        self.worker_id = worker_id
+        self.worker = None
+        
+    def __enter__(self):
+        """
+        Вход в контекстный блок - создание и запуск работника
+        
+        Returns:
+            MonitorWorker: Инициализированный и запущенный работник
+        """
+        self.logger.debug(f"Создание и запуск работника {self.worker_id}")
+        
+        # Создаем работника
+        self.worker = MonitorWorker(
+            self.app_context, 
+            self.task_queue, 
+            self.result_queue, 
+            self.worker_id
+        )
+        
+        # Запускаем поток
+        self.worker.start()
+        
+        return self.worker
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Выход из контекстного блока - корректная остановка работника
+        
+        Args:
+            exc_type: Тип исключения, если оно возникло
+            exc_val: Значение исключения
+            exc_tb: Трассировка исключения
+            
+        Returns:
+            bool: Флаг обработки исключения
+        """
+        # Логируем исключение, если оно возникло
+        if exc_type:
+            self.logger.error(f"Произошло исключение при работе с потоком: {exc_val}")
+            log_exception(self.logger, "Ошибка при работе с потоком мониторинга")
+        
+        # Корректно останавливаем работника, если он был создан
+        if self.worker:
+            try:
+                self.logger.debug(f"Остановка работника {self.worker.worker_id}")
+                self.worker.stop()
+                
+                # Ждем завершения потока максимум 5 секунд
+                if self.worker.is_alive():
+                    self.worker.join(5.0)
+                
+                # Если поток все еще жив, логируем ошибку
+                if self.worker.is_alive():
+                    self.logger.warning(f"Работник {self.worker.worker_id} не остановился корректно")
+            except Exception as e:
+                self.logger.error(f"Ошибка при остановке работника {self.worker.worker_id}: {e}")
+                log_exception(self.logger, "Ошибка при остановке работника")
+        
+        self.logger.debug("Выход из контекстного блока работника")
+        return False  # Не подавляем исключения

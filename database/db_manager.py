@@ -144,7 +144,71 @@ class DBManager:
         """
         return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
     
-    def execute_query(self, query, params=None, fetch_all=True, commit=True):
+    def _execute_with_retry(self, cursor, query, params=None, max_retries=5):
+        """
+        Выполнение запроса с повторными попытками при блокировке БД
+        
+        Args:
+            cursor: Курсор SQLite
+            query: SQL-запрос
+            params: Параметры запроса
+            max_retries: Максимальное количество попыток
+            
+        Returns:
+            cursor: Курсор после выполнения запроса
+            
+        Raises:
+            sqlite3.Error: В случае ошибки SQLite
+        """
+        retry_count = 0
+        last_error = None
+        
+        # Список ошибок, при которых стоит повторить запрос
+        retryable_errors = [
+            "database is locked",
+            "busy",
+            "no such table", # Временная ошибка, которая может возникнуть при конкурентных изменениях схемы
+            "disk I/O error" # Может возникнуть при проблемах с диском
+        ]
+        
+        # Базовое время задержки (в миллисекундах)
+        base_delay_ms = 50
+        
+        while retry_count < max_retries:
+            try:
+                if params:
+                    return cursor.execute(query, params)
+                else:
+                    return cursor.execute(query)
+            except sqlite3.Error as e:
+                last_error = e
+                error_message = str(e).lower()
+                
+                # Проверяем, является ли ошибка повторяемой
+                retryable = any(err in error_message for err in retryable_errors)
+                
+                if not retryable:
+                    self.logger.error(f"Неповторяемая ошибка SQLite: {e}")
+                    raise  # Если ошибка не связана с блокировкой, повторять не имеет смысла
+                
+                retry_count += 1
+                
+                if retry_count >= max_retries:
+                    self.logger.error(f"Превышено максимальное количество попыток ({max_retries}) для запроса: {query}")
+                    raise
+                
+                # Экспоненциальная задержка с небольшим случайным компонентом
+                import random
+                delay_ms = base_delay_ms * (2 ** (retry_count - 1)) + random.randint(0, 50)
+                delay_seconds = delay_ms / 1000.0
+                
+                self.logger.warning(f"БД заблокирована, повторная попытка {retry_count}/{max_retries} через {delay_seconds:.3f} сек.: {query}")
+                time.sleep(delay_seconds)
+        
+        # Если мы дошли до этой точки, значит все повторные попытки не удались
+        raise last_error
+
+    def execute_query(self, query, params=None, fetch_all=True, commit=True, retries=5):
         """
         Выполнение SQL-запроса к базе данных
         
