@@ -15,6 +15,9 @@ __pycache__/
 reports/
 temp_report.html
 
+# Старая версия кода
+/report_output
+
 # Файлы настроек IDE
 .vscode/
 .idea/
@@ -22,3 +25,31 @@ temp_report.html
 # Системные файлы
 .DS_Store
 Thumbs.db
+
+# Конфигурационные файлы среды
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Бэкапы
+*.bak
+
+# Файлы данных
+*.csv
+*.dat
+*.out
+
+# Скомпилированные файлы
+*.o
+*.so
+*.a
+*.dylib
+
+# Временные файлы
+*.tmp
+*.swp
+*.swo
+
+# Файлы отчетов
+*.report

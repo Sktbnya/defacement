@@ -1,0 +1,63 @@
+{
+    "database": {
+        "path": "c:\\Users\\iddavydov\\Documents\\def_beta\\WDM_V12\\data\\wdm_database.db",
+        "backup_dir": "c:\\Users\\iddavydov\\Documents\\def_beta\\WDM_V12\\data\\backups",
+        "backup_interval_days": 7,
+        "retention_days": 90
+    },
+    "monitoring": {
+        "check_interval_seconds": 3600,
+        "timeout_seconds": 30,
+        "retries": 3,
+        "retry_delay_seconds": 5,
+        "diff_threshold_percent": 5.0,
+        "max_workers": 5,
+        "use_headless_browser": true
+    },
+    "ui": {
+        "theme": "light",
+        "font_size": 10,
+        "window_size": [
+            1024,
+            768
+        ],
+        "save_window_position": true,
+        "show_system_tray": true,
+        "minimize_to_tray": true
+    },
+    "report": {
+        "default_format": "html",
+        "available_formats": [
+            "html",
+            "csv",
+            "xlsx",
+            "pdf"
+        ],
+        "max_items_per_page": 50,
+        "include_screenshots": true,
+        "include_diff_details": true
+    },
+    "notifications": {
+        "enable_desktop": true,
+        "enable_email": false,
+        "email_recipients": [],
+        "smtp_server": "",
+        "smtp_port": 587,
+        "smtp_user": "",
+        "smtp_password": ""
+    },
+    "logging": {
+        "level": "INFO",
+        "max_file_size_mb": 10,
+        "backup_count": 5,
+        "console_output": true
+    },
+    "browser": {
+        "executable_path": "",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "wait_time_seconds": 10,
+        "proxy": null,
+        "browser_type": "chrome",
+        "use_webdriver_manager": true
+    }
+}

@@ -1,0 +1,146 @@
+
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>Отчет WDM - changes</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; color: #333; line-height: 1.6; }
+                    h1, h2, h3, h4 { color: #444; margin-top: 20px; }
+                    h1 { border-bottom: 2px solid #5d87a1; padding-bottom: 10px; }
+                    h2 { border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+                    
+                    /* Основные блоки */
+                    .container { max-width: 1200px; margin: 0 auto; }
+                    .section { margin: 30px 0; }
+                    
+                    /* Таблицы */
+                    table { border-collapse: collapse; width: 100%; margin: 20px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+                    th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+                    th { background-color: #f5f5f5; font-weight: bold; position: sticky; top: 0; }
+                    tr:nth-child(even) { background-color: #f9f9f9; }
+                    tr:hover { background-color: #f1f1f1; }
+                    
+                    /* Карточки статистики */
+                    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }
+                    .stat-card { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); 
+                                 transition: transform 0.3s, box-shadow 0.3s; text-align: center; }
+                    .stat-card:hover { transform: translateY(-5px); box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+                    .stat-card h3 { margin-top: 0; color: #666; font-size: 16px; }
+                    .stat-card p { font-size: 28px; font-weight: bold; margin: 10px 0 0; color: #333; }
+                    
+                    /* Категории изменений */
+                    .changes-categories { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin: 20px 0; }
+                    .category { padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .category.critical { background-color: rgba(255, 82, 82, 0.1); border-left: 4px solid #ff5252; }
+                    .category.normal { background-color: rgba(255, 193, 7, 0.1); border-left: 4px solid #ffc107; }
+                    .category.minor { background-color: rgba(76, 175, 80, 0.1); border-left: 4px solid #4caf50; }
+                    .category h3 { margin-top: 0; }
+                    
+                    /* Индикатор прогресса */
+                    .progress-bar { width: 100%; height: 10px; background-color: #f0f0f0; border-radius: 5px; overflow: hidden; margin: 10px 0; }
+                    .progress { height: 100%; border-radius: 5px; }
+                    .critical .progress { background-color: #ff5252; }
+                    .normal .progress { background-color: #ffc107; }
+                    .minor .progress { background-color: #4caf50; }
+                    
+                    /* Детальный анализ изменений */
+                    .detailed-changes { margin: 20px 0; }
+                    .change-analysis { padding: 15px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+                    .change-analysis.critical { background-color: rgba(255, 82, 82, 0.05); border-left: 4px solid #ff5252; }
+                    .change-analysis.normal { background-color: rgba(255, 193, 7, 0.05); border-left: 4px solid #ffc107; }
+                    .change-analysis.minor { background-color: rgba(76, 175, 80, 0.05); border-left: 4px solid #4caf50; }
+                    .change-analysis h3 { margin-top: 0; }
+                    .analysis-details { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+                    .changed { color: #ff5252; font-weight: bold; }
+                    span.critical { color: #ff5252; font-weight: bold; }
+                    span.normal { color: #ff9800; font-weight: bold; }
+                    span.minor { color: #4caf50; font-weight: bold; }
+                    
+                    /* Таблицы по категориям */
+                    .changes-table.critical th { background-color: rgba(255, 82, 82, 0.2); }
+                    .changes-table.normal th { background-color: rgba(255, 193, 7, 0.2); }
+                    .changes-table.minor th { background-color: rgba(76, 175, 80, 0.2); }
+                    
+                    /* Круговая диаграмма для ошибок */
+                    .pie-chart-container { display: flex; justify-content: center; align-items: center; margin: 30px 0; flex-wrap: wrap; }
+                    .pie-chart { position: relative; width: 250px; height: 250px; border-radius: 50%; background-color: #f0f0f0; margin: 20px; }
+                    .pie-segment { position: absolute; width: 100%; height: 100%; border-radius: 50%; clip-path: polygon(50% 50%, 50% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, 50% 0%); 
+                                  transform-origin: 50% 50%; transform: rotate(var(--start)); background-color: var(--color);
+                                  clip-path: polygon(50% 50%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, 100% 0%); }
+                    .pie-legend { display: flex; flex-direction: column; justify-content: center; }
+                    .legend-item { display: flex; align-items: center; margin-bottom: 8px; }
+                    .color-box { width: 15px; height: 15px; margin-right: 8px; }
+                    
+                    /* Предупреждения */
+                    .warning { background-color: rgba(255, 193, 7, 0.1); border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px; margin: 20px 0; }
+                    .warning p { margin: 0; color: #856404; }
+                    
+                    /* Адаптивная верстка */
+                    @media (max-width: 768px) {
+                        .stats, .changes-categories { grid-template-columns: 1fr; }
+                        .analysis-details { grid-template-columns: 1fr; }
+                        .pie-chart-container { flex-direction: column; }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>Отчет по changes</h1>
+                    <p>Период: 11.02.2025 - 13.03.2025</p>
+                    <p>Дата создания: 13.03.2025 13:52</p>
+            
+        <div class="stats">
+            <div class="stat-card">
+                <h3>Всего изменений</h3>
+                <p>0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Сайтов с изменениями</h3>
+                <p>0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Средний процент изменений</h3>
+                <p>0.00%</p>
+            </div>
+        </div>
+        
+        <h2>Категоризация изменений</h2>
+        <div class="changes-categories">
+            <div class="category critical">
+                <h3>Критические изменения (0)</h3>
+                <div class="progress-bar">
+                    <div class="progress" style="width: 0.0%"></div>
+                </div>
+                <p>Изменения более 50%</p>
+            </div>
+            <div class="category normal">
+                <h3>Значимые изменения (0)</h3>
+                <div class="progress-bar">
+                    <div class="progress" style="width: 0.0%"></div>
+                </div>
+                <p>Изменения от 10% до 50%</p>
+            </div>
+            <div class="category minor">
+                <h3>Незначительные изменения (0)</h3>
+                <div class="progress-bar">
+                    <div class="progress" style="width: 0.0%"></div>
+                </div>
+                <p>Изменения менее 10%</p>
+            </div>
+        </div>
+        
+        <h2>Детальный анализ изменений</h2>
+        <div class="detailed-changes">
+        
+            <p>Детальный анализ изменений недоступен для данного отчета.</p>
+            
+        </div>
+        
+                    <div class="footer" style="margin-top: 40px; text-align: center; color: #777; font-size: 14px; border-top: 1px solid #ddd; padding-top: 20px;">
+                        <p>Отчет создан с помощью Web Data Monitor V12 © 2025 AT-Consulting</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            
