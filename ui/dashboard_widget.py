@@ -16,9 +16,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QFrame, QScrollArea, QSizePolicy, QGridLayout, QTableWidget, 
     QTableWidgetItem, QHeaderView, QProgressBar, QTabWidget,
-    QSpacerItem, QMessageBox, QPropertyAnimation, QMenu, QFileDialog
+    QSpacerItem, QMessageBox, QMenu, QFileDialog
 )
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QRect, QPointF, QPoint
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QRect, QPointF, QPoint, QPropertyAnimation
 from PyQt6.QtGui import (
     QIcon, QPixmap, QFont, QColor, QPalette, QAction, QPainter, 
     QPen, QBrush, QPainterPath, QPaintEvent
