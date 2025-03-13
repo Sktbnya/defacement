@@ -11,9 +11,7 @@ __pycache__/
 # Логи
 *.log
 
-# Генерируемые отчеты и временные файлы
-reports/
-temp_report.html
+
 
 # Старая версия кода
 /report_output
